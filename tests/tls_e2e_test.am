@@ -1,0 +1,151 @@
+// End-to-end test for amalgame-tls v0.1.
+//
+// Spawns a TLS server on localhost, connects a TLS client to it,
+// exchanges a payload, verifies negotiated parameters.
+//
+// Prerequisites:
+//   - libssl-dev installed (or equivalent on macOS / Windows)
+//   - A test cert + key at ./tests/server.pem + ./tests/server.key
+//
+// To generate the test cert (once):
+//   openssl req -x509 -newkey rsa:2048 -nodes \
+//     -keyout tests/server.key -out tests/server.pem \
+//     -days 365 -subj "/CN=localhost"
+//
+// Run:
+//   amc -o /tmp/tls_e2e tests/tls_e2e_test.am
+//   /tmp/tls_e2e
+
+namespace Tests
+
+import Amalgame.Collections
+import Amalgame.Net
+import Amalgame.Tls
+import Amalgame.Threading
+
+// Server-side handler — accepts one connection, echoes the request,
+// closes. Runs in a background thread so Main can play the client role.
+public class ServerThread {
+    public static void Run(TlsContext ctx) {
+        let srv: AmalgameTcpServer = TcpServer_Listen(18443, 5)
+        if (!TcpServer_IsListening(srv)) {
+            Console.WriteLine("[FAIL] server listen")
+            return
+        }
+        let conn: AmalgameTcpConn = TcpServer_Accept(srv)
+        let stream: TlsStream = TlsStream.Wrap(conn._fd, ctx, true)
+        if (!stream.Handshake()) {
+            Console.WriteLine("[FAIL] server handshake: " + stream.LastError())
+            return
+        }
+        Console.WriteLine("[PASS] server handshake")
+
+        let buf: List<int> = new List<int>()
+        let n: int = stream.Read(buf, 4096)
+        if (n > 0) {
+            Console.WriteLine("[PASS] server read " + String_FromInt(n) + " bytes")
+            stream.Write(buf)
+            Console.WriteLine("[PASS] server echoed")
+        } else {
+            Console.WriteLine("[FAIL] server read")
+        }
+        stream.Close()
+        TcpConn_Close(conn)
+        TcpServer_Close(srv)
+    }
+}
+
+public class Program {
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-tls v0.1 — e2e test")
+
+        // ── Server side: load cert + start listener in background ──
+        let serverCfg: TlsConfig = TlsConfig.Default()
+            .WithCertFile("tests/server.pem", "tests/server.key")
+            .WithMinVersion(12)
+            .WithAlpn("h2,http/1.1")
+        let serverCtx: TlsContext = TlsContext.Server(serverCfg)
+        if (String_Length(serverCtx.LastError()) > 0) {
+            Console.WriteLine("[FAIL] server ctx: " + serverCtx.LastError())
+            return
+        }
+        Console.WriteLine("[PASS] server ctx ready")
+
+        Thread.Spawn(fn() { ServerThread.Run(serverCtx) })
+
+        // Give the server a moment to bind.
+        Thread.SleepMs(200)
+
+        // ── Client side ──
+        let clientCfg: TlsConfig = TlsConfig.Default()
+            .WithInsecureSkipVerify(true)        // self-signed test cert
+            .WithAlpn("h2,http/1.1")
+        let clientCtx: TlsContext = TlsContext.Client(clientCfg)
+        if (String_Length(clientCtx.LastError()) > 0) {
+            Console.WriteLine("[FAIL] client ctx: " + clientCtx.LastError())
+            return
+        }
+        Console.WriteLine("[PASS] client ctx ready")
+
+        let conn: AmalgameTcpClient = TcpClient_Connect("127.0.0.1", 18443)
+        if (!TcpClient_IsConnected(conn)) {
+            Console.WriteLine("[FAIL] client tcp connect")
+            return
+        }
+        Console.WriteLine("[PASS] client tcp connect")
+
+        let stream: TlsStream = TlsStream.Wrap(conn._fd, clientCtx, false)
+        if (!stream.Handshake()) {
+            Console.WriteLine("[FAIL] client handshake: " + stream.LastError())
+            return
+        }
+        Console.WriteLine("[PASS] client handshake")
+
+        // Verify negotiated parameters.
+        let proto: string = stream.AlpnProto()
+        if (proto == "h2" || proto == "http/1.1") {
+            Console.WriteLine("[PASS] ALPN negotiated: " + proto)
+        } else {
+            Console.WriteLine("[FAIL] ALPN got '" + proto + "'")
+        }
+
+        let ver: string = stream.TlsVersion()
+        if (ver == "TLSv1.2" || ver == "TLSv1.3") {
+            Console.WriteLine("[PASS] TLS version: " + ver)
+        } else {
+            Console.WriteLine("[FAIL] TLS version got '" + ver + "'")
+        }
+
+        let cipher: string = stream.CipherSuite()
+        if (String_Length(cipher) > 0) {
+            Console.WriteLine("[PASS] cipher: " + cipher)
+        } else {
+            Console.WriteLine("[FAIL] no cipher")
+        }
+
+        // Send a payload, read the echo.
+        let payload: List<int> = new List<int>()
+        let msg: string = "hello, tls!"
+        for (var i: int = 0; i < String_Length(msg); i = i + 1) {
+            payload.Add(String_CharCodeAt(msg, i))
+        }
+        let written: int = stream.Write(payload)
+        if (written == payload.Count()) {
+            Console.WriteLine("[PASS] client wrote " + String_FromInt(written) + " bytes")
+        } else {
+            Console.WriteLine("[FAIL] client write")
+        }
+
+        let echo: List<int> = new List<int>()
+        let nr: int = stream.Read(echo, 4096)
+        if (nr == payload.Count()) {
+            Console.WriteLine("[PASS] echo round-trip")
+        } else {
+            Console.WriteLine("[FAIL] echo " + String_FromInt(nr) + "/" + String_FromInt(payload.Count()))
+        }
+
+        stream.Close()
+        TcpClient_Close(conn)
+        Console.WriteLine("[PASS] done")
+    }
+}

@@ -502,9 +502,11 @@ static inline i64 Amalgame_Tls_TlsStream_Read(
         s->LastError = _amtls_last_ssl_error();
         return -1;
     }
-    /* Copy decrypted bytes into the AM-side List<int>. */
+    /* Copy decrypted bytes into the AM-side List<int>. AmalgameList
+     * stores `void*` slots; AM boxes ints via `(intptr_t)` casts at
+     * call sites, so we mirror that here. */
     for (int i = 0; i < n; i++) {
-        AmalgameList_add_int(buf, (i64) tmp[i]);
+        AmalgameList_add(buf, (void*)(intptr_t)(unsigned char) tmp[i]);
     }
     return (i64) n;
 }

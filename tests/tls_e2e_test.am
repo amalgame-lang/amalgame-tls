@@ -23,6 +23,17 @@ import Amalgame.Net
 import Amalgame.Tls
 import Amalgame.Threading
 
+// AM has no built-in `string[i] → int byte`; bridge via inline C.
+@c {
+    static i64 Tests_byte_at(code_string s, i64 i) {
+        return (i64)(unsigned char) s[i];
+    }
+}
+
+public Function _byte_at(string s, int i): int {
+    return Tests_byte_at(s, i)
+}
+
 // Server-side handler — accepts one connection, echoes the request,
 // closes. Runs in a background thread so Main can play the client role.
 public class ServerThread {
@@ -123,11 +134,13 @@ public class Program {
             Console.WriteLine("[FAIL] no cipher")
         }
 
-        // Send a payload, read the echo.
+        // Send a payload, read the echo. AM has no string→int byte
+        // helper, so we bridge via a small inline-C function below.
         let payload: List<int> = new List<int>()
         let msg: string = "hello, tls!"
-        for (var i: int = 0; i < String_Length(msg); i = i + 1) {
-            payload.Add(String_CharCodeAt(msg, i))
+        let msgLen: int = String_Length(msg)
+        for i in 0..msgLen {
+            payload.Add(_byte_at(msg, i))
         }
         let written: int = stream.Write(payload)
         if (written == payload.Count()) {

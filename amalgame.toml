@@ -1,0 +1,62 @@
+# amalgame-tls — TLS 1.2 / 1.3 client + server primitives.
+#
+# Wraps OpenSSL 3.x (or LibreSSL — same ABI). Used as the foundation
+# layer for amalgame-net-http and amalgame-web (Mosaic).
+#
+# Install:
+#   amc package add tls
+#
+# System prerequisites:
+#   Linux  (Debian/Ubuntu) : sudo apt install libssl-dev
+#   Linux  (Fedora/RHEL)   : sudo dnf install openssl-devel
+#   macOS  (Homebrew)      : brew install openssl@3
+#   Windows (msys2)        : pacman -S mingw-w64-x86_64-openssl
+#
+# See proposal: docs/proposals/amalgame-web.md (§4.1)
+
+[package]
+name              = "amalgame-tls"
+version           = "0.1.0"
+license           = "Apache-2.0"
+description       = "TLS 1.2/1.3 client+server primitives (OpenSSL 3.x binding)."
+required-amalgame = ">=0.8.29"
+schema-version    = 1
+
+[stdlib]
+# Multi-class manifest (added in amc v0.8.29). The package exposes
+# three distinct AM classes — config builder, SSL context, wire stream.
+classes   = ["TlsConfig", "TlsContext", "TlsStream"]
+header    = "runtime/Amalgame_Tls.h"
+namespace = "Amalgame.Tls"
+# `-lssl -lcrypto` appended to the final link line. Both ship with
+# OpenSSL on every supported OS (and with LibreSSL, drop-in compat).
+libs      = ["ssl", "crypto"]
+
+[stdlib.functions]
+# ── TlsConfig — builder ─────────────────────────────────────────────
+TlsConfig_Default            = { returns = "AmalgameTlsConfig*" }
+TlsConfig_WithCertFile       = { returns = "AmalgameTlsConfig*" }
+TlsConfig_WithCertBytes      = { returns = "AmalgameTlsConfig*" }
+TlsConfig_WithClientAuth     = { returns = "AmalgameTlsConfig*" }
+TlsConfig_WithMinVersion     = { returns = "AmalgameTlsConfig*" }
+TlsConfig_WithAlpn           = { returns = "AmalgameTlsConfig*" }
+TlsConfig_WithSessionTickets = { returns = "AmalgameTlsConfig*" }
+TlsConfig_WithInsecureSkipVerify = { returns = "AmalgameTlsConfig*" }
+
+# ── TlsContext — server / client SSL_CTX ────────────────────────────
+TlsContext_Server            = { returns = "AmalgameTlsContext*" }
+TlsContext_Client            = { returns = "AmalgameTlsContext*" }
+TlsContext_LastError         = { returns = "code_string" }
+
+# ── TlsStream — TLS over a raw fd ───────────────────────────────────
+TlsStream_Wrap               = { returns = "AmalgameTlsStream*" }
+TlsStream_Handshake          = { returns = "code_bool" }
+TlsStream_Read               = { returns = "i64" }
+TlsStream_Write              = { returns = "i64" }
+TlsStream_Close              = { returns = "void" }
+TlsStream_IsConnected        = { returns = "code_bool" }
+TlsStream_LastError          = { returns = "code_string" }
+TlsStream_PeerCertSubject    = { returns = "code_string" }
+TlsStream_AlpnProto          = { returns = "code_string" }
+TlsStream_TlsVersion         = { returns = "code_string" }
+TlsStream_CipherSuite        = { returns = "code_string" }

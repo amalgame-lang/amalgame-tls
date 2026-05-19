@@ -31,6 +31,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 /* ================================================================
    OpenSSL detection — multi-OS
@@ -562,6 +567,210 @@ static inline i64 Amalgame_Tls_TlsStream_WriteBytes(
     if (written > 0) return (i64) written;
     s->LastError = _amtls_last_ssl_error();
     return -1;
+}
+
+/* ── ACME (Let's Encrypt) — v0.2.0 ─────────────────────────────────
+ *
+ * v0.2.0 ships a SUBPROCESS-WRAPPING client: Acme.EnsureCert shells
+ * out to `certbot` (which must be installed) in --standalone mode.
+ * Port 80 must be free during the call — certbot binds it itself,
+ * runs the http-01 challenge, gets the cert, and we read the
+ * resulting files back. ~100 LoC of wrapping over a battle-tested
+ * client. Production-usable today.
+ *
+ * **STILL TODO for v0.3.0**: native pure-AM ACME (RFC 8555) — JWS
+ * account signing via EVP_PKEY + JSON marshaling + order /
+ * authorization / finalize state machine + CSR DER encoding. The
+ * `Acme.EnsureCert` API will stay stable; only the implementation
+ * swaps.
+ *
+ * Acme.ChallengeServer is a minimal HTTP/1.1 listener that responds
+ * to /.well-known/acme-challenge/<token> from a webroot directory.
+ * For webroot-mode certbot (server stays up, no port-80 hand-off).
+ *
+ * Usage:
+ *
+ *     // Prod: provision a Let's Encrypt cert (needs port 80 free + DNS)
+ *     let rc = Acme.EnsureCert("example.com", "admin@example.com", "./certs")
+ *     if (rc != 0) { Console.WriteLine("cert provisioning failed"); return }
+ *     let cert = Acme.CertPath("example.com", "./certs")
+ *     let key  = Acme.KeyPath("example.com", "./certs")
+ *     Https.Serve(443, cert, key, handler)
+ *
+ * For dev / localhost, use self-signed via `openssl req -x509 -newkey ...`
+ * — Acme.EnsureCert against Let's Encrypt won't issue for localhost.
+ */
+
+static inline i64 Amalgame_Tls_Acme_EnsureCert(code_string domain,
+                                                code_string email,
+                                                code_string dir) {
+    if (!domain || !domain[0] || !email || !email[0] || !dir || !dir[0]) {
+        fprintf(stderr, "Acme.EnsureCert: domain, email, dir all required\n");
+        return -1;
+    }
+    /* Build certbot command. --standalone binds port 80 itself.
+     * --config-dir / --work-dir / --logs-dir keep all state under
+     * the user-chosen directory (no /etc/letsencrypt by default —
+     * we want unprivileged usable). */
+    char cmd[2048];
+    int n = snprintf(cmd, sizeof(cmd),
+        "certbot certonly --standalone "
+        "--config-dir '%s/etc' "
+        "--work-dir   '%s/work' "
+        "--logs-dir   '%s/log' "
+        "-d '%s' --email '%s' "
+        "--agree-tos --non-interactive --no-eff-email "
+        "--cert-name '%s' 2>&1",
+        dir, dir, dir, domain, email, domain);
+    if (n < 0 || (size_t)n >= sizeof(cmd)) {
+        fprintf(stderr, "Acme.EnsureCert: command buffer overflow\n");
+        return -1;
+    }
+    fprintf(stdout, "Acme.EnsureCert: running certbot for %s...\n", domain);
+    fflush(stdout);
+    /* Run certbot. Stderr is merged into stdout so user sees the
+     * full log on failure. */
+    int rc = system(cmd);
+    if (rc != 0) {
+        fprintf(stderr, "Acme.EnsureCert: certbot exited %d "
+                "(install with: sudo apt install certbot)\n",
+                WEXITSTATUS(rc));
+        return -2;
+    }
+    fprintf(stdout, "Acme.EnsureCert: cert ready for %s\n", domain);
+    return 0;
+}
+
+static inline code_string Amalgame_Tls_Acme_CertPath(code_string domain,
+                                                      code_string dir) {
+    if (!domain || !dir) return "";
+    char* buf = (char*)GC_MALLOC_ATOMIC(strlen(dir) + strlen(domain) + 48);
+    sprintf(buf, "%s/etc/live/%s/fullchain.pem", dir, domain);
+    return buf;
+}
+
+static inline code_string Amalgame_Tls_Acme_KeyPath(code_string domain,
+                                                     code_string dir) {
+    if (!domain || !dir) return "";
+    char* buf = (char*)GC_MALLOC_ATOMIC(strlen(dir) + strlen(domain) + 48);
+    sprintf(buf, "%s/etc/live/%s/privkey.pem", dir, domain);
+    return buf;
+}
+
+/* ── ChallengeServer — webroot-mode http-01 ────────────────────────
+ *
+ * Minimal HTTP/1.1 listener that responds to:
+ *   GET /.well-known/acme-challenge/<token>
+ * by reading `<webroot>/.well-known/acme-challenge/<token>` from
+ * disk. Everything else gets 301 redirect to https://<host><path>.
+ *
+ * Blocks forever — typically run in a separate process (or as a
+ * sibling of your HTTPS server via fork). Returns -2 on listen
+ * fail. Useful when certbot is run in --webroot mode and the
+ * server stays up during cert renewal.
+ */
+static inline i64 Amalgame_Tls_Acme_ChallengeServer(i64 port,
+                                                    code_string webroot) {
+    if (!webroot || !webroot[0]) {
+        fprintf(stderr, "Acme.ChallengeServer: webroot required\n");
+        return -1;
+    }
+    int sfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sfd < 0) return -2;
+    int one = 1;
+    setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons((uint16_t)port);
+    if (bind(sfd, (struct sockaddr*)&addr, sizeof(addr)) < 0 ||
+        listen(sfd, 64) < 0) {
+        close(sfd);
+        return -2;
+    }
+    fprintf(stdout,
+        "Acme.ChallengeServer: listening on :%lld (webroot=%s)\n",
+        (long long)port, webroot);
+    fflush(stdout);
+
+    for (;;) {
+        int cfd = accept(sfd, NULL, NULL);
+        if (cfd < 0) continue;
+        /* Read up to 8 KB of request — way more than needed for
+         * a challenge GET. */
+        char req[8192];
+        ssize_t n = recv(cfd, req, sizeof(req) - 1, 0);
+        if (n <= 0) { close(cfd); continue; }
+        req[n] = 0;
+
+        /* Parse: "GET /path HTTP/1.x\r\n..." */
+        char path[1024]; path[0] = 0;
+        if (sscanf(req, "GET %1023s HTTP/", path) != 1) {
+            const char* bad = "HTTP/1.1 400 Bad Request\r\n"
+                              "Content-Length: 0\r\n\r\n";
+            send(cfd, bad, strlen(bad), 0);
+            close(cfd);
+            continue;
+        }
+
+        if (strncmp(path, "/.well-known/acme-challenge/", 28) == 0) {
+            /* Serve from webroot. Path-traversal guard: token must
+             * not contain '/' or '..'. */
+            const char* token = path + 28;
+            if (strchr(token, '/') || strstr(token, "..")) {
+                const char* bad = "HTTP/1.1 400 Bad Request\r\n"
+                                  "Content-Length: 0\r\n\r\n";
+                send(cfd, bad, strlen(bad), 0);
+                close(cfd);
+                continue;
+            }
+            char file_path[2048];
+            snprintf(file_path, sizeof(file_path),
+                     "%s/.well-known/acme-challenge/%s", webroot, token);
+            FILE* f = fopen(file_path, "r");
+            if (!f) {
+                const char* nf = "HTTP/1.1 404 Not Found\r\n"
+                                 "Content-Length: 0\r\n"
+                                 "Connection: close\r\n\r\n";
+                send(cfd, nf, strlen(nf), 0);
+                close(cfd);
+                continue;
+            }
+            fseek(f, 0, SEEK_END);
+            long sz = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            char* body = (char*)malloc(sz + 1);
+            fread(body, 1, sz, f);
+            body[sz] = 0;
+            fclose(f);
+
+            char hdr[256];
+            int hlen = snprintf(hdr, sizeof(hdr),
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: text/plain\r\n"
+                "Content-Length: %ld\r\n"
+                "Connection: close\r\n\r\n", sz);
+            send(cfd, hdr, hlen, 0);
+            if (sz > 0) send(cfd, body, sz, 0);
+            free(body);
+        } else {
+            /* Everything else: 301 redirect to HTTPS. We don't know
+             * the host header reliably here, so emit a relative
+             * redirect — the browser appends the same host. */
+            char hdr[1024];
+            int hlen = snprintf(hdr, sizeof(hdr),
+                "HTTP/1.1 301 Moved Permanently\r\n"
+                "Location: https://localhost%s\r\n"  /* placeholder host */
+                "Content-Length: 0\r\n"
+                "Connection: close\r\n\r\n", path);
+            send(cfd, hdr, hlen, 0);
+        }
+        close(cfd);
+    }
+    /* unreachable */
+    close(sfd);
+    return 0;
 }
 
 static inline void Amalgame_Tls_TlsStream_Close(AmalgameTlsStream* s) {

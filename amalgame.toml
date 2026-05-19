@@ -16,16 +16,16 @@
 
 [package]
 name              = "amalgame-tls"
-version           = "0.1.3"
+version           = "0.2.0"
 license           = "Apache-2.0"
-description       = "TLS 1.2/1.3 client+server primitives (OpenSSL 3.x binding)."
+description       = "TLS 1.2/1.3 primitives + ACME (Let's Encrypt) cert provisioning."
 required-amalgame = ">=0.8.29"
 schema-version    = 1
 
 [stdlib]
 # Multi-class manifest (added in amc v0.8.29). The package exposes
 # three distinct AM classes — config builder, SSL context, wire stream.
-classes   = ["TlsConfig", "TlsContext", "TlsStream"]
+classes   = ["TlsConfig", "TlsContext", "TlsStream", "Acme"]
 header    = "runtime/Amalgame_Tls.h"
 namespace = "Amalgame.Tls"
 # `-lssl -lcrypto` appended to the final link line. Both ship with
@@ -62,3 +62,11 @@ TlsStream_PeerCertSubject    = { returns = "code_string" }
 TlsStream_AlpnProto          = { returns = "code_string" }
 TlsStream_TlsVersion         = { returns = "code_string" }
 TlsStream_CipherSuite        = { returns = "code_string" }
+
+# ── Acme — Let's Encrypt cert provisioning (v0.2.0) ─────────────────
+# v0.2.0 wraps certbot (must be installed). v0.3.0 will replace this
+# with a pure-AM RFC 8555 implementation (same API surface).
+Acme_EnsureCert              = { returns = "i64" }
+Acme_CertPath                = { returns = "code_string" }
+Acme_KeyPath                 = { returns = "code_string" }
+Acme_ChallengeServer         = { returns = "i64" }

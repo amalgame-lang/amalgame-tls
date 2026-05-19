@@ -528,6 +528,42 @@ static inline i64 Amalgame_Tls_TlsStream_Write(
     return (i64) written;
 }
 
+/* ── Raw-byte read/write (v0.1.3+) ────────────────────────────────
+ * The List-based Read/Write above box every byte into an AmalgameList
+ * cell — convenient for pure-AM code but allocation-heavy on the H2
+ * server hot path (recv 16 KB chunks, send frames repeatedly).
+ *
+ * These raw-byte versions skip the boxing: they read/write directly
+ * into a caller-owned buffer via SSL_read / SSL_write. amalgame-net-http
+ * v0.3 uses them from its nghttp2 send/recv callbacks so TLS data path
+ * has the same cost as plain socket I/O.
+ *
+ * Returns the number of bytes transferred (> 0), 0 on clean close,
+ * -1 on error (with LastError set on the stream).
+ */
+static inline i64 Amalgame_Tls_TlsStream_ReadBytes(
+        AmalgameTlsStream* s, char* buf, i64 max) {
+    if (!s || !s->_ssl || !s->Connected || !buf || max <= 0) return -1;
+    int n = SSL_read((SSL*) s->_ssl, buf, (int) max);
+    if (n > 0) return (i64) n;
+    int err = SSL_get_error((SSL*) s->_ssl, n);
+    if (err == SSL_ERROR_ZERO_RETURN) {
+        s->Connected = false;
+        return 0;
+    }
+    s->LastError = _amtls_last_ssl_error();
+    return -1;
+}
+
+static inline i64 Amalgame_Tls_TlsStream_WriteBytes(
+        AmalgameTlsStream* s, const char* buf, i64 len) {
+    if (!s || !s->_ssl || !s->Connected || !buf || len <= 0) return -1;
+    int written = SSL_write((SSL*) s->_ssl, buf, (int) len);
+    if (written > 0) return (i64) written;
+    s->LastError = _amtls_last_ssl_error();
+    return -1;
+}
+
 static inline void Amalgame_Tls_TlsStream_Close(AmalgameTlsStream* s) {
     if (!s || !s->_ssl) return;
     SSL* ssl = (SSL*) s->_ssl;
@@ -650,6 +686,12 @@ static inline i64 Amalgame_Tls_TlsStream_Read(
 static inline i64 Amalgame_Tls_TlsStream_Write(
     AmalgameTlsStream* s, AmalgameList* b)
     { (void)s; (void)b; return -1; }
+static inline i64 Amalgame_Tls_TlsStream_ReadBytes(
+    AmalgameTlsStream* s, char* buf, i64 max)
+    { (void)s; (void)buf; (void)max; return -1; }
+static inline i64 Amalgame_Tls_TlsStream_WriteBytes(
+    AmalgameTlsStream* s, const char* buf, i64 len)
+    { (void)s; (void)buf; (void)len; return -1; }
 static inline void Amalgame_Tls_TlsStream_Close(AmalgameTlsStream* s)
     { (void)s; }
 static inline code_bool Amalgame_Tls_TlsStream_IsConnected(AmalgameTlsStream* s)

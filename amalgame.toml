@@ -16,7 +16,7 @@
 
 [package]
 name              = "amalgame-tls"
-version           = "0.2.1"
+version           = "0.2.2"
 license           = "Apache-2.0"
 description       = "TLS 1.2/1.3 primitives + ACME (Let's Encrypt) cert provisioning."
 required-amalgame = ">=0.8.29"
@@ -67,6 +67,7 @@ TlsStream_CipherSuite        = { returns = "code_string" }
 # v0.2.0 wraps certbot (must be installed). v0.3.0 will replace this
 # with a pure-AM RFC 8555 implementation (same API surface).
 Acme_EnsureCert              = { returns = "i64" }
+Acme_EnsureCertEx            = { returns = "i64" }
 Acme_CertPath                = { returns = "code_string" }
 Acme_KeyPath                 = { returns = "code_string" }
 Acme_ChallengeServer         = { returns = "i64" }

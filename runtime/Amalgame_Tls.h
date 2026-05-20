@@ -604,13 +604,45 @@ static inline i64 Amalgame_Tls_TlsStream_WriteBytes(
  * — Acme.EnsureCert against Let's Encrypt won't issue for localhost.
  */
 
-static inline i64 Amalgame_Tls_Acme_EnsureCert(code_string domain,
-                                                code_string email,
-                                                code_string dir) {
+/* EnsureCertEx — full-control variant (v0.2.2+).
+ *
+ * Two extra knobs over the bare EnsureCert:
+ *   acme_server   — ACME directory URL. Empty = use certbot's default
+ *                   (Let's Encrypt production). Override to point at
+ *                   LE-staging, Buypass, ZeroSSL, etc. — anywhere
+ *                   that speaks RFC 8555. Falls back to the env var
+ *                   MOSAIC_TLS_ACME_SERVER when the param is empty.
+ *   certbot_path  — Path to the certbot executable. Empty = look up
+ *                   "certbot" in $PATH (execvp behavior). Override
+ *                   when certbot is in a non-standard location or
+ *                   shadowed by another binary. Falls back to env
+ *                   var MOSAIC_TLS_CERTBOT_PATH.
+ *
+ * Bare Acme.EnsureCert(domain, email, dir) is now a thin wrapper
+ * that calls EnsureCertEx with empty server + certbot_path, so the
+ * env vars still kick in even when callers haven't switched yet.
+ */
+static inline i64 Amalgame_Tls_Acme_EnsureCertEx(code_string domain,
+                                                  code_string email,
+                                                  code_string dir,
+                                                  code_string acme_server,
+                                                  code_string certbot_path) {
     if (!domain || !domain[0] || !email || !email[0] || !dir || !dir[0]) {
         fprintf(stderr, "Acme.EnsureCert: domain, email, dir all required\n");
         return -1;
     }
+    /* Resolve server + binary: explicit param > env var > default. */
+    const char* server = (acme_server && acme_server[0]) ? acme_server : NULL;
+    if (!server) {
+        const char* env = getenv("MOSAIC_TLS_ACME_SERVER");
+        if (env && env[0]) server = env;
+    }
+    const char* certbot = (certbot_path && certbot_path[0]) ? certbot_path : NULL;
+    if (!certbot) {
+        const char* env = getenv("MOSAIC_TLS_CERTBOT_PATH");
+        if (env && env[0]) certbot = env;
+    }
+    if (!certbot) certbot = "certbot";   /* let execvp search $PATH */
     /* --config-dir / --work-dir / --logs-dir keep all state under
      * the user-chosen directory (no /etc/letsencrypt by default —
      * we want unprivileged usable). Compose the three paths up-front;
@@ -627,21 +659,31 @@ static inline i64 Amalgame_Tls_Acme_EnsureCert(code_string domain,
         return -1;
     }
     /* argv vector — execvp does not interpret shell metacharacters,
-     * so domain/email/dir cannot inject commands. (Previously this
-     * function built a shell string with single-quoted substitutions,
-     * which is unsafe if any input contains a single quote.) */
-    char* const argv[] = {
-        (char*)"certbot", (char*)"certonly", (char*)"--standalone",
-        (char*)"--config-dir", etc_dir,
-        (char*)"--work-dir",   work_dir,
-        (char*)"--logs-dir",   log_dir,
-        (char*)"-d",           (char*)domain,
-        (char*)"--email",      (char*)email,
-        (char*)"--agree-tos", (char*)"--non-interactive", (char*)"--no-eff-email",
-        (char*)"--cert-name",  (char*)domain,
-        NULL,
-    };
-    fprintf(stdout, "Acme.EnsureCert: running certbot for %s...\n", domain);
+     * so domain/email/dir cannot inject commands. argv[0] is the
+     * conventional program name (certbot sees it via $0). */
+    char* argv[24];
+    int ai = 0;
+    argv[ai++] = (char*)certbot;
+    argv[ai++] = (char*)"certonly";
+    argv[ai++] = (char*)"--standalone";
+    argv[ai++] = (char*)"--config-dir"; argv[ai++] = etc_dir;
+    argv[ai++] = (char*)"--work-dir";   argv[ai++] = work_dir;
+    argv[ai++] = (char*)"--logs-dir";   argv[ai++] = log_dir;
+    argv[ai++] = (char*)"-d";           argv[ai++] = (char*)domain;
+    argv[ai++] = (char*)"--email";      argv[ai++] = (char*)email;
+    argv[ai++] = (char*)"--agree-tos";
+    argv[ai++] = (char*)"--non-interactive";
+    argv[ai++] = (char*)"--no-eff-email";
+    argv[ai++] = (char*)"--cert-name";  argv[ai++] = (char*)domain;
+    if (server) {
+        argv[ai++] = (char*)"--server"; argv[ai++] = (char*)server;
+    }
+    argv[ai] = NULL;
+
+    fprintf(stdout, "Acme.EnsureCert: running %s for %s%s%s...\n",
+            certbot, domain,
+            server ? " against " : "",
+            server ? server      : "");
     fflush(stdout);
     pid_t pid = fork();
     if (pid < 0) {
@@ -652,11 +694,11 @@ static inline i64 Amalgame_Tls_Acme_EnsureCert(code_string domain,
         /* Child. Merge stderr into stdout so the user sees the full
          * certbot log on failure (matches the previous "2>&1" behavior). */
         dup2(STDOUT_FILENO, STDERR_FILENO);
-        execvp("certbot", argv);
+        execvp(certbot, argv);
         /* exec only returns on failure. */
-        fprintf(stdout, "Acme.EnsureCert: exec certbot failed: %s "
+        fprintf(stdout, "Acme.EnsureCert: exec %s failed: %s "
                 "(install with: sudo apt install certbot)\n",
-                strerror(errno));
+                certbot, strerror(errno));
         _exit(127);
     }
     int status;
@@ -676,6 +718,15 @@ static inline i64 Amalgame_Tls_Acme_EnsureCert(code_string domain,
     }
     fprintf(stdout, "Acme.EnsureCert: cert ready for %s\n", domain);
     return 0;
+}
+
+/* Convenience wrapper — keeps the v0.2.0 API compiling unchanged.
+ * The env-var fallbacks (MOSAIC_TLS_ACME_SERVER, MOSAIC_TLS_CERTBOT_PATH)
+ * still apply via EnsureCertEx. */
+static inline i64 Amalgame_Tls_Acme_EnsureCert(code_string domain,
+                                                code_string email,
+                                                code_string dir) {
+    return Amalgame_Tls_Acme_EnsureCertEx(domain, email, dir, "", "");
 }
 
 static inline code_string Amalgame_Tls_Acme_CertPath(code_string domain,

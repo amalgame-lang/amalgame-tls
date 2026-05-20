@@ -178,9 +178,10 @@ openssl req -x509 -newkey rsa:2048 -nodes -keyout server.key -out server.pem \
 
 ## Roadmap
 
-- **v0.1** ← *here*: file-based and inline-PEM certs, client+server, TLS 1.2/1.3, ALPN, client-auth, custom verify
+- **v0.1**: file-based and inline-PEM certs, client+server, TLS 1.2/1.3, ALPN, client-auth, custom verify
 - **v0.2**: ACME / Let's Encrypt automatic certs (tls-alpn-01 + http-01)
-- **v0.3**: SNI handler (multi-cert dispatch), OCSP stapling
+- **v0.2.1** ← *here*: `Acme.EnsureCert` switched from `system()` to `fork`+`execvp` — eliminates shell-injection risk on user-controlled `domain`/`email`/`dir` arguments
+- **v0.3**: SNI handler (multi-cert dispatch), OCSP stapling, native pure-AM ACME (RFC 8555)
 
 ## License
 

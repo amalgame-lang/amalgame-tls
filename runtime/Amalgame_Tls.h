@@ -36,6 +36,7 @@
 #include <arpa/inet.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <errno.h>
 
 /* ================================================================
    OpenSSL detection — multi-OS
@@ -571,8 +572,10 @@ static inline i64 Amalgame_Tls_TlsStream_WriteBytes(
 
 /* ── ACME (Let's Encrypt) — v0.2.0 ─────────────────────────────────
  *
- * v0.2.0 ships a SUBPROCESS-WRAPPING client: Acme.EnsureCert shells
- * out to `certbot` (which must be installed) in --standalone mode.
+ * v0.2.x ships a SUBPROCESS-WRAPPING client: Acme.EnsureCert
+ * fork+execvp's `certbot` (which must be installed) in --standalone
+ * mode. No shell is invoked — domain/email/dir are passed as argv
+ * elements, so they cannot inject shell metacharacters.
  * Port 80 must be free during the call — certbot binds it itself,
  * runs the http-01 challenge, gets the cert, and we read the
  * resulting files back. ~100 LoC of wrapping over a battle-tested
@@ -608,33 +611,67 @@ static inline i64 Amalgame_Tls_Acme_EnsureCert(code_string domain,
         fprintf(stderr, "Acme.EnsureCert: domain, email, dir all required\n");
         return -1;
     }
-    /* Build certbot command. --standalone binds port 80 itself.
-     * --config-dir / --work-dir / --logs-dir keep all state under
+    /* --config-dir / --work-dir / --logs-dir keep all state under
      * the user-chosen directory (no /etc/letsencrypt by default —
-     * we want unprivileged usable). */
-    char cmd[2048];
-    int n = snprintf(cmd, sizeof(cmd),
-        "certbot certonly --standalone "
-        "--config-dir '%s/etc' "
-        "--work-dir   '%s/work' "
-        "--logs-dir   '%s/log' "
-        "-d '%s' --email '%s' "
-        "--agree-tos --non-interactive --no-eff-email "
-        "--cert-name '%s' 2>&1",
-        dir, dir, dir, domain, email, domain);
-    if (n < 0 || (size_t)n >= sizeof(cmd)) {
-        fprintf(stderr, "Acme.EnsureCert: command buffer overflow\n");
+     * we want unprivileged usable). Compose the three paths up-front;
+     * they're passed to certbot as argv elements (no shell), so they
+     * don't need quoting — they just need to fit. */
+    char etc_dir[1024], work_dir[1024], log_dir[1024];
+    int n1 = snprintf(etc_dir,  sizeof(etc_dir),  "%s/etc",  dir);
+    int n2 = snprintf(work_dir, sizeof(work_dir), "%s/work", dir);
+    int n3 = snprintf(log_dir,  sizeof(log_dir),  "%s/log",  dir);
+    if (n1 < 0 || (size_t)n1 >= sizeof(etc_dir) ||
+        n2 < 0 || (size_t)n2 >= sizeof(work_dir) ||
+        n3 < 0 || (size_t)n3 >= sizeof(log_dir)) {
+        fprintf(stderr, "Acme.EnsureCert: directory path too long\n");
         return -1;
     }
+    /* argv vector — execvp does not interpret shell metacharacters,
+     * so domain/email/dir cannot inject commands. (Previously this
+     * function built a shell string with single-quoted substitutions,
+     * which is unsafe if any input contains a single quote.) */
+    char* const argv[] = {
+        (char*)"certbot", (char*)"certonly", (char*)"--standalone",
+        (char*)"--config-dir", etc_dir,
+        (char*)"--work-dir",   work_dir,
+        (char*)"--logs-dir",   log_dir,
+        (char*)"-d",           (char*)domain,
+        (char*)"--email",      (char*)email,
+        (char*)"--agree-tos", (char*)"--non-interactive", (char*)"--no-eff-email",
+        (char*)"--cert-name",  (char*)domain,
+        NULL,
+    };
     fprintf(stdout, "Acme.EnsureCert: running certbot for %s...\n", domain);
     fflush(stdout);
-    /* Run certbot. Stderr is merged into stdout so user sees the
-     * full log on failure. */
-    int rc = system(cmd);
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "Acme.EnsureCert: fork failed: %s\n", strerror(errno));
+        return -1;
+    }
+    if (pid == 0) {
+        /* Child. Merge stderr into stdout so the user sees the full
+         * certbot log on failure (matches the previous "2>&1" behavior). */
+        dup2(STDOUT_FILENO, STDERR_FILENO);
+        execvp("certbot", argv);
+        /* exec only returns on failure. */
+        fprintf(stdout, "Acme.EnsureCert: exec certbot failed: %s "
+                "(install with: sudo apt install certbot)\n",
+                strerror(errno));
+        _exit(127);
+    }
+    int status;
+    if (waitpid(pid, &status, 0) < 0) {
+        fprintf(stderr, "Acme.EnsureCert: waitpid failed: %s\n", strerror(errno));
+        return -1;
+    }
+    if (!WIFEXITED(status)) {
+        fprintf(stderr, "Acme.EnsureCert: certbot terminated abnormally\n");
+        return -2;
+    }
+    int rc = WEXITSTATUS(status);
     if (rc != 0) {
         fprintf(stderr, "Acme.EnsureCert: certbot exited %d "
-                "(install with: sudo apt install certbot)\n",
-                WEXITSTATUS(rc));
+                "(install with: sudo apt install certbot)\n", rc);
         return -2;
     }
     fprintf(stdout, "Acme.EnsureCert: cert ready for %s\n", domain);

@@ -1,0 +1,119 @@
+// examples/letsencrypt-site — a one-file site secured with a real
+// Let's Encrypt certificate, provisioned at startup via AcmeNative
+// (amalgame-tls v0.3.0). No certbot, no shell scripts.
+//
+// What this program does:
+//   1. Read DOMAIN, EMAIL, CERT_DIR from env vars (with sane defaults
+//      for the LE staging endpoint).
+//   2. Provision a cert for DOMAIN through ACME http-01:
+//        - spawns a tiny HTTP listener on :80 to serve the challenge
+//        - signs the ACME requests with a fresh (or reused) ES256
+//          account key persisted at <CERT_DIR>/account.key
+//        - writes the issued cert to <CERT_DIR>/<DOMAIN>/{fullchain,privkey}.pem
+//   3. Serves a single HTTPS route at GET / over the freshly issued cert.
+//
+// Requirements at runtime:
+//   - DOMAIN must resolve to the public IP of this machine (LE's
+//     validator dials the domain on port 80).
+//   - Port 80 + 443 must be free for the process to bind. Either run
+//     as root, or grant CAP_NET_BIND_SERVICE:
+//
+//       sudo setcap 'cap_net_bind_service=+ep' ./site
+//
+//   - First run uses LE *staging* by default (cert isn't trusted by
+//     browsers, but the rate limits are generous). Flip ACME_SERVER
+//     to LeProd when the staging flow works end-to-end.
+//
+// Build (assuming amalgame-tls and amalgame-net-http are installed
+// via `amc package add tls net-http`):
+//
+//     amc -o site server.am
+//
+// Run:
+//
+//     DOMAIN=mysite.example.com \
+//       EMAIL=ops@example.com \
+//       CERT_DIR=./certs \
+//       ./site
+
+namespace Site
+
+import Amalgame.Tls
+import Amalgame.Net.Http
+
+public class Program {
+    public static int Main(string[] args) {
+        // ── 1. Env-driven config (with safe staging defaults) ──
+        var domain:  string = ""
+        var email:   string = ""
+        var certDir: string = "./certs"
+        var server:  string = AcmeNative.LeStaging()
+        @c {
+            const char* d = getenv("DOMAIN");
+            const char* e = getenv("EMAIL");
+            const char* c = getenv("CERT_DIR");
+            const char* s = getenv("ACME_SERVER");
+            if (d) domain  = (code_string) d;
+            if (e) email   = (code_string) e;
+            if (c) certDir = (code_string) c;
+            if (s && s[0]) server = (code_string) s;
+        }
+        if (String_Length(domain) == 0 || String_Length(email) == 0) {
+            Console.WriteError("set DOMAIN and EMAIL env vars (see top of server.am)")
+            return 2
+        }
+
+        Console.WriteLine("──────────────────────────────────────────────")
+        Console.WriteLine("  letsencrypt-site — about to provision a cert")
+        Console.WriteLine("──────────────────────────────────────────────")
+        Console.WriteLine("  domain   : " + domain)
+        Console.WriteLine("  email    : " + email)
+        Console.WriteLine("  cert dir : " + certDir)
+        Console.WriteLine("  ACME url : " + server)
+        Console.WriteLine("")
+
+        // ── 2. Provision (or renew) the cert ────────────────────
+        let rc: int = AcmeNative.EnsureCert(domain, email, certDir, server)
+        if (rc != 0) {
+            Console.WriteError("AcmeNative.EnsureCert failed, rc=" + String_FromInt(rc))
+            Console.WriteError("see preceding stderr lines from the ACME flow")
+            return 3
+        }
+
+        // Cert layout AcmeNative produces — same shape the v0.2.x
+        // certbot wrapper used, so AcmeConfig.CertPath()/KeyPath()
+        // from amalgame-web resolves against either backend.
+        let certPath: string = certDir + "/" + domain + "/fullchain.pem"
+        let keyPath:  string = certDir + "/" + domain + "/privkey.pem"
+        Console.WriteLine("")
+        Console.WriteLine("  cert: " + certPath)
+        Console.WriteLine("  key : " + keyPath)
+        Console.WriteLine("")
+
+        // ── 3. Serve HTTPS on :443 ──────────────────────────────
+        // Handler closes over `domain` so the body has a fresh value
+        // even if EnsureCert had to retry against a different name.
+        let handler = conn => {
+            let body: string = "Hello from " + domain
+                + " — served with a real ACME certificate over Amalgame.Tls + Amalgame.Net.Http.\n"
+            var cInt: int = 0
+            @c { cInt = (i64)(uintptr_t) conn; }
+            let req:  HttpRequest  = HttpRequest.FromH1Conn(cInt)
+            let resp: HttpResponse = HttpResponse.New()
+                .Status(200)
+                .Header("content-type", "text/plain; charset=utf-8")
+                .Text(body)
+            resp.WriteToH1Conn(cInt)
+            return 0
+        }
+
+        Console.WriteLine("  Listening on https://" + domain + "/")
+        Console.WriteLine("  Test with: curl -k https://" + domain + "/")
+        Console.WriteLine("")
+
+        // Https.Serve is single-thread + ALPN h2 by default.  Swap
+        // to ServeMt() when you need concurrency, or ServeWith()
+        // for HttpServerConfig (timeouts, min TLS version, …).
+        return Https.Serve(443, certPath, keyPath, handler)
+    }
+}

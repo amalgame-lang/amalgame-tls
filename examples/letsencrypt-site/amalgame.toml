@@ -1,0 +1,14 @@
+
+[dependencies]
+
+[dependencies.tls]
+git = "github.com/amalgame-lang/amalgame-tls"
+tag = "v0.3.0"
+
+[dependencies.http]
+git = "github.com/amalgame-lang/amalgame-net-http"
+tag = "v0.7.1"
+
+[dependencies.crypto]
+git = "github.com/amalgame-lang/amalgame-crypto"
+tag = "v0.3.0"

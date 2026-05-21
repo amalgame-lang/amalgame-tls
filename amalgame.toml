@@ -16,11 +16,20 @@
 
 [package]
 name              = "amalgame-tls"
-version           = "0.3.0"
+version           = "0.3.1"
 license           = "Apache-2.0"
 description       = "TLS 1.2/1.3 primitives + native ACME (RFC 8555) cert provisioning."
-required-amalgame = ">=0.8.38"
+required-amalgame = ">=0.8.39"
 schema-version    = 1
+
+# Runtime dependencies on other Amalgame packages.  amc >= 0.8.39
+# auto-pulls these recursively when `amc package add tls` is run,
+# so users never have to install crypto separately.  Older amc
+# versions silently ignore this table — the consumer hits
+# "Unknown symbol 'JwsKey'" at compile time and runs `amc package
+# add crypto` manually.
+[dependencies]
+amalgame-crypto = ">=0.3.0"
 
 [stdlib]
 # Multi-class manifest. v0.3.0 adds AcmeNative (pure-Amalgame RFC 8555

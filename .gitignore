@@ -1,21 +1,6 @@
-# Build artifacts
-build/
-*.o
-*.so
-*.a
-*.dylib
-
-# Test artifacts
-tests/server.pem
-tests/server.key
-tests/*.log
-
-# Amalgame package cache (when this package is consumed by a downstream)
-.amweb-cache/
-
-# Editors / OS
-.DS_Store
-.vscode/
-.idea/
-*.swp
-*~
+# Generated artifacts from the letsencrypt-site example
+examples/letsencrypt-site/site
+examples/letsencrypt-site/site.c
+examples/letsencrypt-site/server.c
+examples/letsencrypt-site/core
+examples/letsencrypt-site/certs/

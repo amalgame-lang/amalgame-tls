@@ -1,0 +1,464 @@
+// amalgame-tls — AcmeNative (v0.3.0).
+//
+// Pure-Amalgame implementation of the ACME (RFC 8555) protocol for
+// automated cert provisioning. Drops the v0.2.x subprocess wrapper
+// around certbot in favour of a self-contained client built on:
+//
+//   - amalgame-crypto v0.3.0  — JwsKey (ES256), base64url
+//   - amalgame-tls runtime    — Amalgame_Tls_Acme.h (HTTPS client,
+//                                 CSR DER encoder, http-01 server
+//                                 spawner, key/cert file I/O)
+//   - amalgame-stdlib Json    — request/response parsing
+//
+// Today (v0.3.0):
+//   - http-01 challenge ONLY  (no dns-01, no tls-alpn-01)
+//   - single-domain          (multi-SAN returns in v0.3.1)
+//   - ES256 account key      (RS256 supported by JwsKey but not
+//                              wired through to the account flow yet)
+//   - port 80 is grabbed by an in-process forked child during the
+//     challenge — make sure nothing else is listening there
+//
+// User pattern:
+//
+//   import Amalgame.Tls
+//
+//   public class Program {
+//       public static void Main(string[] args) {
+//           let rc = AcmeNative.EnsureCert(
+//               "example.com",
+//               "ops@example.com",
+//               "./certs",
+//               "")        // empty = LE production; use AcmeNative.LE_STAGING for dry-run
+//           if (rc != 0) {
+//               Console.WriteError("ACME failed, rc=" + String_FromInt(rc))
+//               return
+//           }
+//           // Cert lives at ./certs/example.com/{fullchain.pem,privkey.pem}
+//           Https.Serve(443, "./certs/example.com/fullchain.pem",
+//                            "./certs/example.com/privkey.pem", handler)
+//       }
+//   }
+//
+// On-disk layout (compatible with the v0.2.x certbot wrapper so
+// AcmeConfig.CertPath() / KeyPath() resolve the same way):
+//
+//   <dir>/account.key                  — PEM PKCS#8 ES256 (created once,
+//                                         reused across renewals)
+//   <dir>/account.url                  — ACME account URL (cached)
+//   <dir>/<domain>/privkey.pem         — cert key (regenerated per renewal)
+//   <dir>/<domain>/fullchain.pem       — leaf + intermediates
+//   <dir>/webroot/.well-known/         — http-01 challenge files (transient)
+//
+// Return codes from EnsureCert:
+//    0   success — cert + key written to disk
+//   -1   bad arguments (empty domain/email/dir)
+//   -2   HTTPS / directory / account / order setup failure
+//   -3   http-01 challenge failed (port 80 unavailable, validation
+//                                   never reached "valid" within timeout)
+//   -4   finalize / cert download failed
+
+namespace Amalgame.Tls
+
+import Amalgame.Collections
+import Amalgame.String
+import Amalgame.Crypto    // JwsKey + Bytes (base64url)
+import Amalgame.Json      // Json.Parse for ACME responses
+
+
+// Parsed ACME directory — just the URLs we need.
+public class AcmeDirectory {
+    public NewNonce:   string
+    public NewAccount: string
+    public NewOrder:   string
+
+    public AcmeDirectory() {
+        this.NewNonce   = ""
+        this.NewAccount = ""
+        this.NewOrder   = ""
+    }
+}
+
+
+public class AcmeNative {
+    // Constants exposed as static methods — amc doesn't (yet) emit
+    // static field initialisers, so we accessor-wrap the URLs.
+    public static string LeProd()    { return "https://acme-v02.api.letsencrypt.org/directory" }
+    public static string LeStaging() { return "https://acme-staging-v02.api.letsencrypt.org/directory" }
+
+    // Instance state — populated as the flow progresses.
+    public Server:    string
+    public Dir:       AcmeDirectory
+    public AcctKey:   JwsKey
+    public AcctUrl:   string   // "" before newAccount; the "kid" after
+    public Nonce:     string
+
+    public AcmeNative() {
+        this.Server  = ""
+        this.Dir     = new AcmeDirectory()
+        this.AcctKey = new JwsKey()
+        this.AcctUrl = ""
+        this.Nonce   = ""
+    }
+
+    // ── Public entry point ──────────────────────────────────────────
+    public static int EnsureCert(domain: string, email: string,
+                                 dir: string, acme_server: string) {
+        if (String_Length(domain) == 0
+            || String_Length(email) == 0
+            || String_Length(dir)    == 0) {
+            Console.WriteLine("AcmeNative: domain/email/dir required")
+            return -1
+        }
+        let server: string = acme_server
+        if (String_Length(server) == 0) {
+            server = AcmeNative.LeProd()
+        }
+        let ctx = new AcmeNative()
+        ctx.Server = server
+        return ctx.RunImpl(domain, email, dir)
+    }
+
+    // ── State machine (instance) ────────────────────────────────────
+    public int RunImpl(domain: string, email: string, dir: string) {
+        // 1) Fetch directory
+        if (!this.FetchDirectory()) { return -2 }
+
+        // 2) Account key (load existing or generate fresh ES256)
+        let acctKeyPath: string = dir + "/account.key"
+        let acctUrlPath: string = dir + "/account.url"
+        let existingPem: string = Acme.LoadPemFile(acctKeyPath)
+        var keyJustCreated: bool = false
+        if (String_Length(existingPem) > 0) {
+            this.AcctKey = JwsKey.FromPemPrivate(existingPem)
+        }
+        if (!this.AcctKey.IsValid()) {
+            this.AcctKey = JwsKey.GenerateEs256()
+            keyJustCreated = true
+            if (!this.AcctKey.IsValid()) {
+                Console.WriteLine("AcmeNative: ES256 keygen failed")
+                return -2
+            }
+        }
+
+        // 3) Initial nonce
+        if (!this.FetchNonce()) { return -2 }
+
+        // 4) Account: POST newAccount (with jwk in protected). LE
+        //    returns 200 OK if the account already exists for this
+        //    key (idempotent), 201 Created on first registration.
+        let cachedUrl: string = Acme.LoadPemFile(acctUrlPath)
+        if (String_Length(cachedUrl) > 0 && !keyJustCreated) {
+            // We cached an account URL with the existing key — reuse.
+            this.AcctUrl = cachedUrl
+        }
+        if (String_Length(this.AcctUrl) == 0) {
+            let payload: string = "{\"termsOfServiceAgreed\":true,\"contact\":[\"mailto:" + email + "\"]}"
+            let resp = this.PostJws(this.Dir.NewAccount, "", payload)
+            if (resp == null
+                || (resp.status != 200 && resp.status != 201)) {
+                Console.WriteLine("AcmeNative: newAccount failed status="
+                    + this.RespStatus(resp))
+                return -2
+            }
+            this.AcctUrl = resp.location
+            if (String_Length(this.AcctUrl) == 0) {
+                Console.WriteLine("AcmeNative: newAccount missing Location")
+                return -2
+            }
+            // Persist for future runs. Best-effort — non-fatal.
+            Acme.SavePemFile(acctKeyPath, this.AcctKey.ToPemPrivate(), 1)
+            Acme.SavePemFile(acctUrlPath, this.AcctUrl,                 1)
+        }
+
+        // 5) newOrder
+        let orderPayload: string = "{\"identifiers\":[{\"type\":\"dns\",\"value\":\"" + domain + "\"}]}"
+        let orderResp = this.PostJws(this.Dir.NewOrder, this.AcctUrl,
+                                     orderPayload)
+        if (orderResp == null
+            || (orderResp.status != 200 && orderResp.status != 201)) {
+            Console.WriteLine("AcmeNative: newOrder failed status="
+                + this.RespStatus(orderResp))
+            return -2
+        }
+        let orderUrl: string = orderResp.location
+        let orderJson: JsonResult = Json.Parse(orderResp.body)
+        if (!orderJson.Ok) {
+            Console.WriteLine("AcmeNative: order body not JSON")
+            return -2
+        }
+        let orderJv: JsonValue = orderJson.Value
+        let authzArr: List<JsonValue> = orderJv.Get("authorizations").AsArray()
+        if (authzArr.Count() == 0) {
+            Console.WriteLine("AcmeNative: order has no authorizations")
+            return -2
+        }
+        let finalizeUrl: string = orderJv.Get("finalize").AsString()
+        if (String_Length(finalizeUrl) == 0) {
+            Console.WriteLine("AcmeNative: order missing finalize URL")
+            return -2
+        }
+
+        // 6) For each authorization: pick http-01, prepare challenge.
+        //    With single-domain, this is one iteration.
+        let webrootDir: string = dir + "/webroot"
+        var spawnedPid: int = 0
+        let kn: int = authzArr.Count()
+        for ai in 0..kn {
+            let authzJv0: JsonValue = authzArr.Get(ai)
+            let authzUrl: string = authzJv0.AsString()
+            if (String_Length(authzUrl) == 0) { continue }
+            let authzResp: AmalgameTlsAcmeHttpResponse = this.PostJws(authzUrl, this.AcctUrl, "")
+            if (authzResp == null || authzResp.status != 200) {
+                Console.WriteLine("AcmeNative: authz fetch failed")
+                this.cleanupChallenge(spawnedPid, webrootDir)
+                return -3
+            }
+            let authzJson: JsonResult = Json.Parse(authzResp.body)
+            let authzJv: JsonValue = authzJson.Value
+            let chals: List<JsonValue> = authzJv.Get("challenges").AsArray()
+            var chalUrl: string = ""
+            var chalToken: string = ""
+            let cn: int = chals.Count()
+            for ci in 0..cn {
+                let ch: JsonValue = chals.Get(ci)
+                if (ch.Get("type").AsString() == "http-01") {
+                    chalUrl   = ch.Get("url").AsString()
+                    chalToken = ch.Get("token").AsString()
+                }
+            }
+            if (String_Length(chalUrl) == 0
+                || String_Length(chalToken) == 0) {
+                Console.WriteLine("AcmeNative: no http-01 challenge offered")
+                this.cleanupChallenge(spawnedPid, webrootDir)
+                return -3
+            }
+
+            // 7) Stage the keyAuthorization file under the webroot,
+            //    then fork a tiny HTTP server bound to :80.
+            let keyAuth: string = chalToken + "." + this.AcctKey.ThumbprintBase64Url()
+            let chalFilePath: string = webrootDir + "/.well-known/acme-challenge/" + chalToken
+            if (Acme.SavePemFile(chalFilePath, keyAuth, 0) != 0) {
+                Console.WriteLine("AcmeNative: can't write challenge file " + chalFilePath)
+                this.cleanupChallenge(spawnedPid, webrootDir)
+                return -3
+            }
+            if (spawnedPid == 0) {
+                spawnedPid = Acme.SpawnChallengeServer(80, webrootDir)
+                if (spawnedPid <= 0) {
+                    Console.WriteLine("AcmeNative: SpawnChallengeServer failed (port 80 in use? need CAP_NET_BIND_SERVICE for non-root binds)")
+                    this.cleanupChallenge(spawnedPid, webrootDir)
+                    return -3
+                }
+                // Give the listener a moment to start before the
+                // ACME server tries to validate.
+                @c { struct timespec ts = {0, 200 * 1000 * 1000}; nanosleep(&ts, NULL); }
+            }
+
+            // 8) Tell the ACME server: try the challenge.
+            let respondResp: AmalgameTlsAcmeHttpResponse = this.PostJws(chalUrl, this.AcctUrl, "{}")
+            if (respondResp == null || respondResp.status != 200) {
+                Console.WriteLine("AcmeNative: challenge respond failed")
+                this.cleanupChallenge(spawnedPid, webrootDir)
+                return -3
+            }
+
+            // 9) Poll the authorization until valid or invalid
+            //    (max 60s — LE typically validates in 1-3s).
+            if (!this.PollAuthorization(authzUrl, 60)) {
+                Console.WriteLine("AcmeNative: authz never reached valid")
+                this.cleanupChallenge(spawnedPid, webrootDir)
+                return -3
+            }
+        }
+        // Challenge done — kill the spawned server now (parent will
+        // also do this in cleanupChallenge if we early-return).
+        if (spawnedPid > 0) {
+            Acme.StopProcess(spawnedPid)
+            spawnedPid = 0
+        }
+
+        // 10) Generate the cert key (separate from the account key).
+        //     ES256 cert keys work on every modern CA; some legacy
+        //     clients prefer RSA, easy upgrade in v0.3.1.
+        let certKey: JwsKey = JwsKey.GenerateEs256()
+        if (!certKey.IsValid()) {
+            Console.WriteLine("AcmeNative: cert keygen failed")
+            return -4
+        }
+
+        // 11) CSR DER (built in C using the cert key's EVP_PKEY)
+        let csrB64: string = Acme.CsrDer_Base64Url(certKey.Handle, domain)
+        if (String_Length(csrB64) == 0) {
+            Console.WriteLine("AcmeNative: CSR DER build failed")
+            return -4
+        }
+
+        // 12) Finalize order
+        let finPayload: string = "{\"csr\":\"" + csrB64 + "\"}"
+        let finResp = this.PostJws(finalizeUrl, this.AcctUrl, finPayload)
+        if (finResp == null || finResp.status != 200) {
+            Console.WriteLine("AcmeNative: finalize failed status="
+                + this.RespStatus(finResp))
+            return -4
+        }
+
+        // 13) Poll the order until valid (cert issued).
+        var certUrl: string = ""
+        var tries: int = 0
+        while (tries < 30) {
+            let pollResp: AmalgameTlsAcmeHttpResponse = this.PostJws(orderUrl, this.AcctUrl, "")
+            if (pollResp == null || pollResp.status != 200) {
+                Console.WriteLine("AcmeNative: order poll failed")
+                return -4
+            }
+            let pj: JsonResult = Json.Parse(pollResp.body)
+            let pjv: JsonValue = pj.Value
+            let s: string = pjv.Get("status").AsString()
+            if (s == "valid") {
+                certUrl = pjv.Get("certificate").AsString()
+                break
+            }
+            if (s == "invalid") {
+                Console.WriteLine("AcmeNative: order went to invalid")
+                return -4
+            }
+            tries = tries + 1
+            @c { struct timespec ts = {1, 0}; nanosleep(&ts, NULL); }
+        }
+        if (String_Length(certUrl) == 0) {
+            Console.WriteLine("AcmeNative: cert URL never returned")
+            return -4
+        }
+
+        // 14) Download cert chain (POST-as-GET; PEM body).
+        let certResp = this.PostJws(certUrl, this.AcctUrl, "")
+        if (certResp == null || certResp.status != 200) {
+            Console.WriteLine("AcmeNative: cert download failed")
+            return -4
+        }
+        let certPem: string = certResp.body
+
+        // 15) Write cert + key to disk
+        let certPath: string = dir + "/" + domain + "/fullchain.pem"
+        let keyPath:  string = dir + "/" + domain + "/privkey.pem"
+        if (Acme.SavePemFile(certPath, certPem, 0) != 0) {
+            Console.WriteLine("AcmeNative: can't write " + certPath)
+            return -4
+        }
+        if (Acme.SavePemFile(keyPath, certKey.ToPemPrivate(), 1) != 0) {
+            Console.WriteLine("AcmeNative: can't write " + keyPath)
+            return -4
+        }
+        Console.WriteLine("AcmeNative: " + domain + " — cert ready at " + certPath)
+        return 0
+    }
+
+    // ── Helpers ─────────────────────────────────────────────────────
+
+    // Fetch + parse the directory document. Populates this.Dir.
+    public bool FetchDirectory() {
+        let r: AmalgameTlsAcmeHttpResponse = Acme.Http(this.Server, "GET", "", "")
+        if (r == null || r.status != 200) { return false }
+        let j: JsonResult = Json.Parse(r.body)
+        let jv: JsonValue = j.Value
+        if (!j.Ok || !jv.IsObject()) { return false }
+        this.Dir.NewNonce   = jv.Get("newNonce").AsString()
+        this.Dir.NewAccount = jv.Get("newAccount").AsString()
+        this.Dir.NewOrder   = jv.Get("newOrder").AsString()
+        return String_Length(this.Dir.NewNonce) > 0
+            && String_Length(this.Dir.NewAccount) > 0
+            && String_Length(this.Dir.NewOrder) > 0
+    }
+
+    public bool FetchNonce() {
+        let r: AmalgameTlsAcmeHttpResponse = Acme.Http(this.Dir.NewNonce, "HEAD", "", "")
+        if (r == null) { return false }
+        // RFC 8555 §7.2 says newNonce returns 200 or 204.
+        if (r.status != 200 && r.status != 204) { return false }
+        if (String_Length(r.nonce) == 0) { return false }
+        this.Nonce = r.nonce
+        return true
+    }
+
+    // POST a JWS-signed payload. When `kid` is empty, the protected
+    // header carries the public JWK (used by newAccount only). When
+    // `kid` is non-empty (the account URL), the protected header
+    // carries it instead — every other ACME request.
+    //
+    // POST-as-GET: pass payload="" (per RFC 8555 §6.3). The signed
+    // body is then `{"protected":"...","payload":"","signature":"..."}`.
+    public AmalgameTlsAcmeHttpResponse PostJws(url: string,
+                                                kid: string,
+                                                payload: string) {
+        if (String_Length(this.Nonce) == 0) {
+            if (!this.FetchNonce()) { return null }
+        }
+        let body: string = this.BuildJws(url, kid, payload)
+        if (String_Length(body) == 0) { return null }
+        let r: AmalgameTlsAcmeHttpResponse = Acme.Http(url, "POST", "application/jose+json", body)
+        if (r == null) { return null }
+        // ACME always returns a fresh Replay-Nonce; consume it.
+        if (String_Length(r.nonce) > 0) {
+            this.Nonce = r.nonce
+        } else {
+            // Server didn't return one — refresh manually.
+            this.FetchNonce()
+        }
+        return r
+    }
+
+    // Build the {"protected":..,"payload":..,"signature":..} JSON.
+    // `payload` is the raw JSON object string the ACME server will
+    // see after base64url-decoding. Pass "" for POST-as-GET.
+    public string BuildJws(url: string, kid: string, payload: string) {
+        let alg: string = this.AcctKey.Algorithm()
+        var protectedJson: string = ""
+        if (String_Length(kid) > 0) {
+            protectedJson = "{\"alg\":\"" + alg + "\",\"kid\":\"" + kid + "\",\"nonce\":\"" + this.Nonce + "\",\"url\":\"" + url + "\"}"
+        } else {
+            // First call (newAccount): use jwk instead of kid.
+            let jwk: string = this.AcctKey.JwkPublic()
+            if (String_Length(jwk) == 0) { return "" }
+            protectedJson = "{\"alg\":\"" + alg + "\",\"jwk\":" + jwk + ",\"nonce\":\"" + this.Nonce + "\",\"url\":\"" + url + "\"}"
+        }
+        let protectedB64: string = Bytes.ToBase64Url(Bytes.FromString(protectedJson))
+        let payloadB64: string = Bytes.ToBase64Url(Bytes.FromString(payload))
+        let signingInput: string = protectedB64 + "." + payloadB64
+        let sig: List<int> = this.AcctKey.Sign(Bytes.FromString(signingInput))
+        let sigB64: string = Bytes.ToBase64Url(sig)
+        return "{\"protected\":\"" + protectedB64 + "\",\"payload\":\"" + payloadB64 + "\",\"signature\":\"" + sigB64 + "\"}"
+    }
+
+    // Poll the authorization until status == "valid". Returns false
+    // on "invalid" or timeout. Polls roughly every second.
+    public bool PollAuthorization(url: string, maxSec: int) {
+        var tries: int = 0
+        while (tries < maxSec) {
+            let r: AmalgameTlsAcmeHttpResponse = this.PostJws(url, this.AcctUrl, "")
+            if (r != null && r.status == 200) {
+                let pj: JsonResult = Json.Parse(r.body)
+                let pjv: JsonValue = pj.Value
+                let s: string = pjv.Get("status").AsString()
+                if (s == "valid")   { return true }
+                if (s == "invalid") { return false }
+            }
+            tries = tries + 1
+            @c { struct timespec ts = {1, 0}; nanosleep(&ts, NULL); }
+        }
+        return false
+    }
+
+    // Pretty status code for error messages — handles null response.
+    public string RespStatus(r: AmalgameTlsAcmeHttpResponse) {
+        if (r == null) { return "(null)" }
+        return String_FromInt(r.status)
+    }
+
+    public void cleanupChallenge(pid: int, webrootDir: string) {
+        if (pid > 0) { Acme.StopProcess(pid) }
+        // We could also rm -rf <webrootDir> here, but leaving the
+        // files lets the user inspect them after a failure for
+        // diagnostics. Webroot doesn't grow unbounded — each token
+        // is single-use.
+    }
+}

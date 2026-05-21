@@ -37,6 +37,10 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <errno.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <time.h>
 
 /* ================================================================
    OpenSSL detection — multi-OS
@@ -1068,5 +1072,10 @@ static inline code_string Amalgame_Tls_TlsStream_CipherSuite(
     AmalgameTlsStream* s) { (void)s; return ""; }
 
 #endif /* AMALGAME_HAS_OPENSSL */
+
+/* Native ACME (RFC 8555) primitives — included here so AM-side
+ * `import Amalgame.Tls` brings them along with the rest of the
+ * package. v0.3.0+. */
+#include "Amalgame_Tls_Acme.h"
 
 #endif /* AMALGAME_TLS_H */

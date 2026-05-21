@@ -16,18 +16,21 @@
 
 [package]
 name              = "amalgame-tls"
-version           = "0.2.3"
+version           = "0.3.0"
 license           = "Apache-2.0"
-description       = "TLS 1.2/1.3 primitives + ACME (Let's Encrypt) cert provisioning."
-required-amalgame = ">=0.8.29"
+description       = "TLS 1.2/1.3 primitives + native ACME (RFC 8555) cert provisioning."
+required-amalgame = ">=0.8.38"
 schema-version    = 1
 
 [stdlib]
-# Multi-class manifest (added in amc v0.8.29). The package exposes
-# three distinct AM classes — config builder, SSL context, wire stream.
-classes   = ["TlsConfig", "TlsContext", "TlsStream", "Acme"]
+# Multi-class manifest. v0.3.0 adds AcmeNative (pure-Amalgame RFC 8555
+# state machine on top of crypto v0.3.0's JwsKey + the runtime's
+# Amalgame_Tls_Acme.h HTTPS/CSR primitives).
+classes   = ["TlsConfig", "TlsContext", "TlsStream", "Acme", "AcmeNative",
+             "AcmeDirectory", "AmalgameTlsAcmeHttpResponse"]
 header    = "runtime/Amalgame_Tls.h"
 namespace = "Amalgame.Tls"
+facade    = "acme.am"
 # `-lssl -lcrypto` appended to the final link line. Both ship with
 # OpenSSL on every supported OS (and with LibreSSL, drop-in compat).
 libs      = ["ssl", "crypto"]
@@ -72,3 +75,13 @@ Acme_EnsureCertMulti         = { returns = "i64" }
 Acme_CertPath                = { returns = "code_string" }
 Acme_KeyPath                 = { returns = "code_string" }
 Acme_ChallengeServer         = { returns = "i64" }
+
+# ── Acme — native RFC 8555 primitives (v0.3.0+) ─────────────────────
+# These are the C-side helpers consumed by acme.am's AcmeNative state
+# machine. Not part of the public AM API — wrapped in AM helpers.
+Acme_Http                    = { returns = "AmalgameTlsAcmeHttpResponse*" }
+Acme_CsrDer_Base64Url        = { returns = "code_string" }
+Acme_SavePemFile             = { returns = "i64" }
+Acme_LoadPemFile             = { returns = "code_string" }
+Acme_SpawnChallengeServer    = { returns = "i64" }
+Acme_StopProcess             = { returns = "i64" }

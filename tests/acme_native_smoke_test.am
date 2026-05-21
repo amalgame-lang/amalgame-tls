@@ -1,0 +1,87 @@
+// Smoke test for AcmeNative (v0.3.0).
+//
+// Verifies that:
+//   1. The compiled AcmeNative class links cleanly against the
+//      crypto-v0.3.0 JwsKey + tls runtime Acme_* primitives.
+//   2. Argument validation rejects the obvious bad calls.
+//   3. The directory fetch path makes a real HTTPS round-trip to
+//      Let's Encrypt's staging endpoint (network reachable) — only
+//      tested when AMALGAME_ACME_LIVE=1 in the environment, since
+//      CI sandboxes often block outbound traffic.
+//
+// We do NOT run a full cert-issuance flow here because that needs:
+//   - port 80 free (root / CAP_NET_BIND_SERVICE)
+//   - a DNS name pointing at this machine
+//   - LE staging rate-limit budget
+// That's an integration test, not a unit smoke.
+
+namespace Tests
+
+import Amalgame.Tls
+import Amalgame.Crypto
+
+public class Program {
+    public static void Main(string[] args) {
+        Console.WriteLine("amalgame-tls — AcmeNative smoke")
+
+        // ── 1. Empty-arg rejection ───────────────────────
+        let r1: int = AcmeNative.EnsureCert("", "x@x.com", "/tmp", "")
+        if (r1 == -1) {
+            Console.WriteLine("[PASS] AcmeNative rejects empty domain")
+        } else {
+            Console.WriteLine("[FAIL] empty domain returned " + String_FromInt(r1))
+        }
+
+        let r2: int = AcmeNative.EnsureCert("a.example.com", "", "/tmp", "")
+        if (r2 == -1) {
+            Console.WriteLine("[PASS] AcmeNative rejects empty email")
+        } else {
+            Console.WriteLine("[FAIL] empty email returned " + String_FromInt(r2))
+        }
+
+        // ── 2. Defaults exposed (LE prod / staging) ──────
+        let prod: string = AcmeNative.LeProd()
+        let stg:  string = AcmeNative.LeStaging()
+        if (String_StartsWith(prod, "https://acme-v02.api.letsencrypt.org")
+            && String_Contains(stg, "staging")) {
+            Console.WriteLine("[PASS] AcmeNative endpoints")
+        } else {
+            Console.WriteLine("[FAIL] endpoints: prod=" + prod + " stg=" + stg)
+        }
+
+        // ── 3. JwsKey round-trip via crypto (sanity) ─────
+        let k = JwsKey.GenerateEs256()
+        if (k.IsValid() && k.Algorithm() == "ES256"
+            && String_Length(k.JwkPublic()) > 30
+            && String_Length(k.ThumbprintBase64Url()) == 43) {
+            Console.WriteLine("[PASS] AcmeNative depends on crypto.JwsKey")
+        } else {
+            Console.WriteLine("[FAIL] crypto.JwsKey unexpected shape")
+        }
+
+        // ── 4. Directory fetch — LIVE only ───────────────
+        // Hits Let's Encrypt staging.  Network may be blocked.
+        // Skip silently when AMALGAME_ACME_LIVE != "1".
+        var liveMode: bool = false
+        @c {
+            const char* live = getenv("AMALGAME_ACME_LIVE");
+            if (live && live[0] == '1') liveMode = 1;
+        }
+        if (liveMode) {
+            Console.WriteLine("[INFO] live mode — fetching LE staging directory")
+            let r: AmalgameTlsAcmeHttpResponse = Acme.Http(
+                AcmeNative.LeStaging(), "GET", "", "")
+            if (r == null) {
+                Console.WriteLine("[FAIL] live directory: HTTPS transport returned null")
+            } else if (r.status == 200 && String_Contains(r.body, "newNonce")) {
+                Console.WriteLine("[PASS] live LE staging directory fetched (HTTPS + cert chain verified)")
+            } else {
+                Console.WriteLine("[FAIL] live directory: status=" + String_FromInt(r.status))
+            }
+        } else {
+            Console.WriteLine("[SKIP] live directory fetch (set AMALGAME_ACME_LIVE=1 to enable)")
+        }
+
+        Console.WriteLine("done")
+    }
+}

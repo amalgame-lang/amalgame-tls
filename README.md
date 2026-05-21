@@ -182,8 +182,9 @@ openssl req -x509 -newkey rsa:2048 -nodes -keyout server.key -out server.pem \
 - **v0.2**: ACME / Let's Encrypt automatic certs (tls-alpn-01 + http-01)
 - **v0.2.1**: `Acme.EnsureCert` switched from `system()` to `fork`+`execvp` — eliminates shell-injection risk on user-controlled `domain`/`email`/`dir` arguments
 - **v0.2.2**: `Acme.EnsureCertEx(domain, email, dir, acme_server, certbot_path)` — opt-in ACME directory URL (LE-staging / Buypass / ZeroSSL / corporate CA) + certbot binary path. Both also read from env vars `MOSAIC_TLS_ACME_SERVER` / `MOSAIC_TLS_CERTBOT_PATH` (and the bare `EnsureCert` keeps working — the env vars apply via the wrapper)
-- **v0.2.3** ← *here*: `Acme.EnsureCertMulti(domains, email, dir, acme_server, certbot_path)` — multi-SAN provisioning. `domains` is a comma-separated list (whitespace + empty entries tolerated); the first one becomes the cert-name so `Acme.CertPath(dom0, dir)` still resolves. Up to 32 SANs per cert. `EnsureCert` and `EnsureCertEx` are now thin wrappers
-- **v0.3**: SNI handler (multi-cert dispatch), OCSP stapling, native pure-AM ACME (RFC 8555)
+- **v0.2.3**: `Acme.EnsureCertMulti(domains, email, dir, acme_server, certbot_path)` — multi-SAN provisioning. `domains` is a comma-separated list (whitespace + empty entries tolerated); the first one becomes the cert-name so `Acme.CertPath(dom0, dir)` still resolves. Up to 32 SANs per cert. `EnsureCert` and `EnsureCertEx` are now thin wrappers
+- **v0.3.0** ← *here*: **native ACME (RFC 8555)** via `AcmeNative.EnsureCert(domain, email, dir, acme_server)`. Pure-AM state machine (directory → newNonce → newAccount → newOrder → http-01 → finalize → cert pickup) built on `amalgame-crypto v0.3.0`'s `JwsKey` (ES256) and an inline HTTPS client (`runtime/Amalgame_Tls_Acme.h`). No subprocess, no certbot dep. Account key persisted at `<dir>/account.key`; cert at `<dir>/<domain>/{fullchain,privkey}.pem`. http-01 challenge only in v0.3.0; multi-SAN returns in v0.3.1. Legacy `Acme.EnsureCert*` (certbot wrapper) is kept side-by-side
+- **v0.3.x**: SNI handler (multi-cert dispatch), OCSP stapling, dns-01 challenge support, multi-SAN in AcmeNative
 
 ## License
 

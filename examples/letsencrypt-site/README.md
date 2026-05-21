@@ -18,26 +18,33 @@ No certbot, no shell scripts, no separate process supervisor.
   or grant the binary the bind-privileged-ports capability:
 
   ```sh
-  sudo setcap 'cap_net_bind_service=+ep' ./site
+  sudo setcap 'cap_net_bind_service=+ep' ./server
   ```
 
-- The packages are installed via `amc package add`. **All three are
-  required** — amc doesn't yet pull transitive deps automatically
-  (tracked for the v0.3.1 / amc-resolver follow-up):
+- Install `tls` via `amc package add` — amc v0.8.39+ pulls
+  `amalgame-crypto` and `amalgame-net-http` transitively from the
+  `[dependencies]` table:
 
   ```sh
-  amc package add crypto net-http tls
+  amc package add tls
   ```
 
-  - `tls` brings the cert primitives + `AcmeNative`.
-  - `net-http` brings `Https.Serve` / `HttpResponse` / `HttpRequest`.
-  - `crypto` brings `JwsKey` (ES256 signing for the ACME account).
+  Older amc (≤ v0.8.38) ignores `[dependencies]`; in that case run
+  `amc package add crypto net-http tls` and pull each one yourself.
 
 ## Build
 
+amc v0.8.39+ ships a one-shot pipeline (`amc build`) that auto-
+precompiles the package facades and links everything into a
+binary:
+
 ```sh
-amc -o site server.am
+amc build server.am          # → ./server
 ```
+
+Older amc (≤ v0.8.38) needs the manual `amc -o site server.am`
+then a gcc invocation with all the package `.o` files — see the
+`amalgame-web/tests/run_tests.sh` runner for the boilerplate.
 
 ## First run — against LE staging (no rate-limit grief)
 
@@ -45,7 +52,7 @@ amc -o site server.am
 DOMAIN=mysite.example.com \
   EMAIL=ops@example.com \
   CERT_DIR=./certs \
-  ./site
+  ./server
 ```
 
 The cert that comes out is **not trusted by browsers** in staging
@@ -60,7 +67,7 @@ DOMAIN=mysite.example.com \
   EMAIL=ops@example.com \
   CERT_DIR=./certs \
   ACME_SERVER=https://acme-v02.api.letsencrypt.org/directory \
-  ./site
+  ./server
 ```
 
 The cert will be trusted by every modern browser. **Don't iterate
@@ -105,12 +112,36 @@ every 60 days (LE certs are valid 90 days, renew at 60 leaves a
 
 ## What's next
 
-This example sticks to the bare `Acme + Https` API. For a real
-Mosaic app you'd typically pair it with:
+This example sticks to the bare `Acme + Https` API — one route,
+plain `HttpResponse`, no routing layer.  For a real production app:
 
-- `Amalgame.Web.WebApp` for routing + middlewares (sessions, CSRF,
-  rate limit, …).
-- `Amalgame.Web.AcmeConfig.FromMap(tomlAcmeSection)` to drive the
-  same flow from `mosaic.toml` instead of env vars.
-- `Https.ServeWith(port, cert, key, cfg, handler)` to wire
-  `HttpServerConfig.WithTlsMinVersion(13)` and similar tunables.
+```sh
+# Once-only install
+curl -sSL https://raw.githubusercontent.com/amalgame-lang/mosaic/main/install.sh | bash
+
+# Per-app
+mosaic new my-site
+cd my-site
+mosaic dev                   # http://localhost:3000, livereload on save
+```
+
+[Mosaic](https://github.com/amalgame-lang/mosaic) wraps the same
+`amalgame-web + amalgame-net-http + amalgame-tls + amalgame-crypto`
+stack with:
+
+- **Filesystem routing** — `app/<path>.am` → route, `[id]` → `:id`,
+  `[...slug]` → `*slug`. Each file declares a `public class Page`
+  with one method per HTTP verb.
+- **`Amalgame.Web.WebApp`** for routing + middlewares (sessions,
+  CSRF, rate limit, CORS, security headers — all configurable from
+  `mosaic.toml`).
+- **`Amalgame.Web.AcmeConfig.FromMap(tomlAcmeSection)`** to drive
+  the ACME flow from `mosaic.toml` (`[tls.acme]`) instead of env
+  vars — same `EnsureCertMulti` call underneath, just declarative.
+- **`Amalgame.Web.TlsBindingConfig.FromMap(tomlTlsSection)`** for
+  `min_version` / `alpn` knobs, fed into
+  `HttpServerConfig.WithTlsMinVersion(13)` and `WithTlsAlpn(...)`.
+
+If you don't want the framework — this single-file example is
+self-contained and stays a valid path for tiny utilities or
+sidecars that need HTTPS without the Mosaic surface.

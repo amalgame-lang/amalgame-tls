@@ -73,6 +73,23 @@ int main(void) {
     AmalgameTlsStream* s = Amalgame_Tls_TlsStream_Wrap(0, tc, 0);
     (void) Amalgame_Tls_TlsStream_LastError(s);
     Amalgame_Tls_TlsStream_Close(s);
+    /* v0.2.3 — multi-SAN parser smoke (no certbot needed): empty
+     * domains list must return -1 (validation rejects). Exercises
+     * the new code path without forking. */
+    i64 rc_empty = Amalgame_Tls_Acme_EnsureCertMulti("", "x@x.com",
+                                                     "/tmp", "", "");
+    if (rc_empty != -1) {
+        fprintf(stderr, "EnsureCertMulti(\"\") returned %ld, expected -1\n",
+                (long) rc_empty);
+        return 1;
+    }
+    i64 rc_blanks = Amalgame_Tls_Acme_EnsureCertMulti(" , , ", "x@x.com",
+                                                       "/tmp", "", "");
+    if (rc_blanks != -1) {
+        fprintf(stderr, "EnsureCertMulti(\" , , \") returned %ld, expected -1\n",
+                (long) rc_blanks);
+        return 1;
+    }
     printf("AMALGAME_HAS_OPENSSL: %d\n",
 #ifdef AMALGAME_HAS_OPENSSL
         1

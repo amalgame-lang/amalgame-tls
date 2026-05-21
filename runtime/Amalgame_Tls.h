@@ -604,33 +604,75 @@ static inline i64 Amalgame_Tls_TlsStream_WriteBytes(
  * — Acme.EnsureCert against Let's Encrypt won't issue for localhost.
  */
 
-/* EnsureCertEx — full-control variant (v0.2.2+).
+/* EnsureCertMulti — multi-SAN variant (v0.2.3+).
  *
- * Two extra knobs over the bare EnsureCert:
- *   acme_server   — ACME directory URL. Empty = use certbot's default
- *                   (Let's Encrypt production). Override to point at
- *                   LE-staging, Buypass, ZeroSSL, etc. — anywhere
- *                   that speaks RFC 8555. Falls back to the env var
- *                   MOSAIC_TLS_ACME_SERVER when the param is empty.
- *   certbot_path  — Path to the certbot executable. Empty = look up
- *                   "certbot" in $PATH (execvp behavior). Override
- *                   when certbot is in a non-standard location or
- *                   shadowed by another binary. Falls back to env
- *                   var MOSAIC_TLS_CERTBOT_PATH.
+ * Identical to EnsureCertEx except `domains` is a comma-separated list
+ * of hostnames. All hostnames end up on one certificate as Subject
+ * Alternative Names; the first one becomes the cert-name (so
+ * Acme.CertPath / Acme.KeyPath compose against it).
  *
- * Bare Acme.EnsureCert(domain, email, dir) is now a thin wrapper
- * that calls EnsureCertEx with empty server + certbot_path, so the
- * env vars still kick in even when callers haven't switched yet.
+ *   domains       — "example.com,www.example.com,api.example.com"
+ *                   Leading/trailing whitespace per element is trimmed.
+ *                   Empty elements (",,") are skipped.
+ *                   At least one non-empty element required.
+ *   email/dir/acme_server/certbot_path — same as EnsureCertEx.
+ *
+ * Up to 32 SANs supported (enough for any sane multi-host cert; ACME
+ * CAs themselves usually cap at 100, but argv would balloon).
+ *
+ * EnsureCertEx is now a thin wrapper that calls this with a single
+ * element. EnsureCert still calls EnsureCertEx for the env-var path.
  */
-static inline i64 Amalgame_Tls_Acme_EnsureCertEx(code_string domain,
-                                                  code_string email,
-                                                  code_string dir,
-                                                  code_string acme_server,
-                                                  code_string certbot_path) {
-    if (!domain || !domain[0] || !email || !email[0] || !dir || !dir[0]) {
-        fprintf(stderr, "Acme.EnsureCert: domain, email, dir all required\n");
+#define AMALGAME_TLS_MAX_SANS 32
+static inline i64 Amalgame_Tls_Acme_EnsureCertMulti(code_string domains,
+                                                     code_string email,
+                                                     code_string dir,
+                                                     code_string acme_server,
+                                                     code_string certbot_path) {
+    if (!domains || !domains[0] || !email || !email[0] || !dir || !dir[0]) {
+        fprintf(stderr, "Acme.EnsureCert: domains, email, dir all required\n");
         return -1;
     }
+    /* Copy domains CSV into a writable buffer so we can split on ',' by
+     * NUL-stuffing. 4KB caps the input — any real SAN list fits well
+     * under that (32 × 64-byte domain ≈ 2KB max). */
+    char dbuf[4096];
+    size_t dlen = strlen(domains);
+    if (dlen >= sizeof(dbuf)) {
+        fprintf(stderr, "Acme.EnsureCert: domains list too long (%zu bytes, max %zu)\n",
+                dlen, sizeof(dbuf) - 1);
+        return -1;
+    }
+    memcpy(dbuf, domains, dlen + 1);
+    char* dlist[AMALGAME_TLS_MAX_SANS];
+    int dcount = 0;
+    char* p = dbuf;
+    while (*p && dcount < AMALGAME_TLS_MAX_SANS) {
+        /* skip leading whitespace */
+        while (*p == ' ' || *p == '\t') p++;
+        char* start = p;
+        while (*p && *p != ',') p++;
+        char* end = p;
+        if (*p == ',') { *p = '\0'; p++; }
+        /* trim trailing whitespace */
+        while (end > start && (end[-1] == ' ' || end[-1] == '\t')) {
+            end--;
+            *end = '\0';
+        }
+        if (*start) {
+            dlist[dcount++] = start;
+        }
+    }
+    if (dcount == 0) {
+        fprintf(stderr, "Acme.EnsureCert: no non-empty domain in '%s'\n", domains);
+        return -1;
+    }
+    if (*p && dcount == AMALGAME_TLS_MAX_SANS) {
+        fprintf(stderr, "Acme.EnsureCert: more than %d SANs not supported\n",
+                AMALGAME_TLS_MAX_SANS);
+        return -1;
+    }
+    code_string domain = dlist[0]; /* cert-name = first */
     /* Resolve server + binary: explicit param > env var > default. */
     const char* server = (acme_server && acme_server[0]) ? acme_server : NULL;
     if (!server) {
@@ -660,8 +702,9 @@ static inline i64 Amalgame_Tls_Acme_EnsureCertEx(code_string domain,
     }
     /* argv vector — execvp does not interpret shell metacharacters,
      * so domain/email/dir cannot inject commands. argv[0] is the
-     * conventional program name (certbot sees it via $0). */
-    char* argv[24];
+     * conventional program name (certbot sees it via $0). Sized for
+     * AMALGAME_TLS_MAX_SANS × (-d <host>) plus the fixed prelude. */
+    char* argv[16 + 2 * AMALGAME_TLS_MAX_SANS];
     int ai = 0;
     argv[ai++] = (char*)certbot;
     argv[ai++] = (char*)"certonly";
@@ -669,7 +712,9 @@ static inline i64 Amalgame_Tls_Acme_EnsureCertEx(code_string domain,
     argv[ai++] = (char*)"--config-dir"; argv[ai++] = etc_dir;
     argv[ai++] = (char*)"--work-dir";   argv[ai++] = work_dir;
     argv[ai++] = (char*)"--logs-dir";   argv[ai++] = log_dir;
-    argv[ai++] = (char*)"-d";           argv[ai++] = (char*)domain;
+    for (int i = 0; i < dcount; i++) {
+        argv[ai++] = (char*)"-d";       argv[ai++] = dlist[i];
+    }
     argv[ai++] = (char*)"--email";      argv[ai++] = (char*)email;
     argv[ai++] = (char*)"--agree-tos";
     argv[ai++] = (char*)"--non-interactive";
@@ -680,10 +725,17 @@ static inline i64 Amalgame_Tls_Acme_EnsureCertEx(code_string domain,
     }
     argv[ai] = NULL;
 
-    fprintf(stdout, "Acme.EnsureCert: running %s for %s%s%s...\n",
-            certbot, domain,
-            server ? " against " : "",
-            server ? server      : "");
+    if (dcount == 1) {
+        fprintf(stdout, "Acme.EnsureCert: running %s for %s%s%s...\n",
+                certbot, domain,
+                server ? " against " : "",
+                server ? server      : "");
+    } else {
+        fprintf(stdout, "Acme.EnsureCert: running %s for %s + %d SAN(s)%s%s...\n",
+                certbot, domain, dcount - 1,
+                server ? " against " : "",
+                server ? server      : "");
+    }
     fflush(stdout);
     pid_t pid = fork();
     if (pid < 0) {
@@ -720,13 +772,24 @@ static inline i64 Amalgame_Tls_Acme_EnsureCertEx(code_string domain,
     return 0;
 }
 
+/* Convenience wrapper — keeps the v0.2.2 single-domain API working.
+ * Since v0.2.3 this is a thin shim over EnsureCertMulti. */
+static inline i64 Amalgame_Tls_Acme_EnsureCertEx(code_string domain,
+                                                  code_string email,
+                                                  code_string dir,
+                                                  code_string acme_server,
+                                                  code_string certbot_path) {
+    return Amalgame_Tls_Acme_EnsureCertMulti(domain, email, dir,
+                                              acme_server, certbot_path);
+}
+
 /* Convenience wrapper — keeps the v0.2.0 API compiling unchanged.
  * The env-var fallbacks (MOSAIC_TLS_ACME_SERVER, MOSAIC_TLS_CERTBOT_PATH)
- * still apply via EnsureCertEx. */
+ * still apply via EnsureCertMulti. */
 static inline i64 Amalgame_Tls_Acme_EnsureCert(code_string domain,
                                                 code_string email,
                                                 code_string dir) {
-    return Amalgame_Tls_Acme_EnsureCertEx(domain, email, dir, "", "");
+    return Amalgame_Tls_Acme_EnsureCertMulti(domain, email, dir, "", "");
 }
 
 static inline code_string Amalgame_Tls_Acme_CertPath(code_string domain,

@@ -15,9 +15,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        amc-tag: [v0.8.34]
+        amc-tag: [v0.8.38]
     steps:
+      # tls checkout into its own dir so the amalgame-crypto sibling
+      # (needed by AcmeNative — depends on crypto v0.3.0's JwsKey) can
+      # live next to it in the runner workspace.
       - uses: actions/checkout@v4
+        with:
+          path: amalgame-tls
+
+      # v0.3.0+: AcmeNative depends on amalgame-crypto v0.3.0's JwsKey
+      # (ES256 signing + base64url). Same sibling-checkout pattern that
+      # amalgame-web uses.
+      - uses: actions/checkout@v4
+        with:
+          repository: amalgame-lang/amalgame-crypto
+          ref: v0.3.0
+          path: amalgame-crypto
 
       - name: Install system deps
         run: |
@@ -37,4 +51,7 @@ jobs:
           echo "AMC_RUNTIME=$RUNNER_TEMP/amc-install/share/amalgame/runtime" >> $GITHUB_ENV
 
       - name: Run tests
+        working-directory: amalgame-tls
+        env:
+          AMALGAME_CRYPTO: ${{ github.workspace }}/amalgame-crypto
         run: ./tests/run_tests.sh "$AMC"

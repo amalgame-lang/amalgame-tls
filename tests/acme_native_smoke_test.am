@@ -82,6 +82,20 @@ public class Program {
             Console.WriteLine("[SKIP] live directory fetch (set AMALGAME_ACME_LIVE=1 to enable)")
         }
 
+        // ── 5. v0.3.3 — cert-expiry helpers ──────────────
+        // Missing file → 999999 sentinel + NeedsRenewal returns true.
+        let missingDays: int = AcmeNative.CertDaysRemaining("/nonexistent-cert-path.pem")
+        if (missingDays == 999999) {
+            Console.WriteLine("[PASS] CertDaysRemaining returns sentinel for missing file")
+        } else {
+            Console.WriteLine("[FAIL] CertDaysRemaining missing-file = " + String_FromInt(missingDays))
+        }
+        if (AcmeNative.NeedsRenewal("/nonexistent-cert-path.pem", 30)) {
+            Console.WriteLine("[PASS] NeedsRenewal=true for missing file")
+        } else {
+            Console.WriteLine("[FAIL] NeedsRenewal should be true for missing file")
+        }
+
         Console.WriteLine("done")
     }
 }

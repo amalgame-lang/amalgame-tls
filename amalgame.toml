@@ -16,9 +16,9 @@
 
 [package]
 name              = "amalgame-tls"
-version           = "0.3.2"
+version           = "0.3.3"
 license           = "Apache-2.0"
-description       = "TLS 1.2/1.3 primitives + native ACME (RFC 8555) cert provisioning. v0.3.2 ships the `acme-renew` CLI under cmd/."
+description       = "TLS 1.2/1.3 primitives + native ACME (RFC 8555) cert provisioning. v0.3.3 ships AcmeNative.CertDaysRemaining + NeedsRenewal helpers for embedded auto-renewal patterns (replaces the cmd/acme-renew CLI dropped in this release)."
 required-amalgame = ">=0.8.39"
 schema-version    = 1
 

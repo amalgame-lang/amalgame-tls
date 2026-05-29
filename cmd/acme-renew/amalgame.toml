@@ -1,0 +1,15 @@
+# cmd/acme-renew — one-shot ACME cert renewal CLI.
+#
+# Build:
+#
+#   amc build main.am               # needs amc v0.8.39+
+#                                   # → ./main (rename to acme-renew)
+#
+# Then ship the binary to your server. No Python / certbot / lego
+# runtime dependency — just libssl.
+
+[dependencies]
+
+[dependencies.tls]
+git = "github.com/amalgame-lang/amalgame-tls"
+tag = "v0.3.2"

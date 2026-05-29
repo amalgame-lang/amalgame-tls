@@ -1,0 +1,103 @@
+// amalgame-tls — `acme-renew` CLI.
+//
+// One-shot cert renewal binary. Wraps `AcmeNative.EnsureCert` so it
+// can be driven from cron / systemd timers without writing custom
+// Amalgame code.
+//
+// Usage:
+//
+//     acme-renew <domain> <email> <dir> [--staging]
+//
+// Returns 0 on success, non-zero on failure. Idempotent — safe to
+// re-run; AcmeNative reuses the existing account key and rotates the
+// cert key on each call.
+//
+// Cron pattern (renew every 60 days at 3am, brief downtime to free
+// port 80 for the http-01 challenge):
+//
+//     0 3 1 */2 * root \
+//         pm2 stop website && \
+//         /usr/local/bin/acme-renew demo.example.com ops@example.com /etc/amalgame-tls ; \
+//         pm2 start website
+//
+// Port 80 binding requires either running as root or
+// `setcap cap_net_bind_service=+ep` on the binary.
+//
+// Build:
+//
+//     amc -o acme-renew main.am
+//
+// Distribute the binary anywhere — it has no Python / certbot / lego
+// runtime dependency, just OpenSSL (libssl).
+
+namespace AcmeRenew
+
+import Amalgame.Tls
+
+public class Program {
+    public static int Main(string[] args) {
+        if (args.Length < 4) {
+            Program.Usage()
+            return 2
+        }
+
+        let domain:  string = args[1]
+        let email:   string = args[2]
+        let certDir: string = args[3]
+
+        var server: string = AcmeNative.LeProd()
+        var i: int = 4
+        while (i < args.Length) {
+            if (args[i] == "--staging") {
+                server = AcmeNative.LeStaging()
+            } else if (args[i] == "--prod") {
+                server = AcmeNative.LeProd()
+            } else if (args[i] == "-h" || args[i] == "--help") {
+                Program.Usage()
+                return 0
+            } else {
+                Console.WriteError("acme-renew: unknown flag '" + args[i] + "'")
+                Program.Usage()
+                return 2
+            }
+            i = i + 1
+        }
+
+        if (String_Length(domain) == 0 || String_Length(email) == 0
+                || String_Length(certDir) == 0) {
+            Console.WriteError("acme-renew: domain, email, and dir must be non-empty")
+            return 2
+        }
+
+        Console.WriteLine("acme-renew: " + domain + " (" + email + ") → " + certDir)
+        Console.WriteLine("            server: " + server)
+
+        let rc: int = AcmeNative.EnsureCert(domain, email, certDir, server)
+        if (rc != 0) {
+            Console.WriteError("acme-renew: EnsureCert failed, rc=" + String_FromInt(rc))
+            Console.WriteError("            (see stderr above for the ACME flow detail)")
+            return rc
+        }
+
+        let certPath: string = certDir + "/" + domain + "/fullchain.pem"
+        let keyPath:  string = certDir + "/" + domain + "/privkey.pem"
+        Console.WriteLine("acme-renew: OK")
+        Console.WriteLine("            cert: " + certPath)
+        Console.WriteLine("            key : " + keyPath)
+        return 0
+    }
+
+    public static void Usage() {
+        Console.WriteError("usage: acme-renew <domain> <email> <dir> [--staging | --prod]")
+        Console.WriteError("")
+        Console.WriteError("  domain   FQDN to issue a cert for (must resolve to this host)")
+        Console.WriteError("  email    contact email registered with the ACME account")
+        Console.WriteError("  dir      writable directory (account.key + per-domain cert dir)")
+        Console.WriteError("")
+        Console.WriteError("  --staging  use Let's Encrypt staging endpoint (untrusted cert,")
+        Console.WriteError("             generous rate limits) — use for the first run")
+        Console.WriteError("  --prod     use Let's Encrypt production endpoint (default)")
+        Console.WriteError("")
+        Console.WriteError("  Port 80 must be free during the http-01 challenge.")
+    }
+}

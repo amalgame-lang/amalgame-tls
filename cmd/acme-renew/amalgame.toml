@@ -1,11 +1,9 @@
 # cmd/acme-renew — one-shot ACME cert renewal CLI.
 #
-# Build (current — uses test-runner pattern as workaround):
+# Build:
 #
-#   ./build.sh
-#
-# `amc build main.am` is the *future* recipe but trips two issues in
-# amc v0.8.5x — see build.sh header for the gory details.
+#   amc build main.am               # needs amc v0.8.59+
+#                                   # → ./main (rename to acme-renew)
 #
 # Ship the binary to your server. No Python / certbot / lego runtime
 # dep — just libssl + libgc.
@@ -16,8 +14,6 @@
 git = "github.com/amalgame-lang/amalgame-tls"
 tag = "v0.3.2"
 
-# Explicit since amc auto-resolution via tls's manifest is amc-version
-# dependent. Pinning here keeps the build reproducible.
 [dependencies.crypto]
 git = "github.com/amalgame-lang/amalgame-crypto"
 tag = "v0.3.0"

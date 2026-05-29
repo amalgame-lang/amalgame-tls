@@ -85,6 +85,82 @@ public class AcmeNative {
     public static string LeProd()    { return "https://acme-v02.api.letsencrypt.org/directory" }
     public static string LeStaging() { return "https://acme-staging-v02.api.letsencrypt.org/directory" }
 
+    // ── v0.3.3: cert-expiry helpers for auto-renewal patterns ──────
+    //
+    // Days remaining before the cert at `certPath` expires.
+    //   > 0    cert is still valid for N days
+    //   == 0   cert expires today (or its notAfter is unparseable —
+    //          caller treats as "renew now")
+    //   < 0    cert is already expired (N days past notAfter)
+    //   == 999999 sentinel for "file missing / unreadable" — also
+    //          treat as "renew now" (callers usually check < threshold)
+    //
+    // Parses the leaf certificate's `notAfter` field via OpenSSL's
+    // `X509_get_notAfter`. Robust to a chain PEM (multiple certs
+    // concatenated): we read only the first BEGIN CERTIFICATE block,
+    // which by convention is the leaf in fullchain.pem files.
+    //
+    // Doesn't validate the chain, the subject, or anything else —
+    // this is a pure "when does it expire?" probe, sized for the
+    // auto-renew check loop. Use NeedsRenewal() for the boolean
+    // wrapper.
+    public static int CertDaysRemaining(certPath: string) {
+        var days: int = 999999
+        @c {
+            if (!certPath || !certPath[0]) {
+                days = 999999;
+            } else {
+                #ifdef AMALGAME_HAS_OPENSSL
+                FILE* fp = fopen(certPath, "r");
+                if (!fp) {
+                    days = 999999;
+                } else {
+                    X509* cert = PEM_read_X509(fp, NULL, NULL, NULL);
+                    fclose(fp);
+                    if (!cert) {
+                        days = 999999;
+                    } else {
+                        const ASN1_TIME* na = X509_get0_notAfter(cert);
+                        int pday = 0, psec = 0;
+                        ASN1_TIME* now = ASN1_TIME_set(NULL, time(NULL));
+                        if (now && ASN1_TIME_diff(&pday, &psec, now, na)) {
+                            days = (i64) pday;
+                        } else {
+                            days = 0;
+                        }
+                        if (now) ASN1_STRING_free(now);
+                        X509_free(cert);
+                    }
+                }
+                #else
+                /* AMALGAME_HAS_OPENSSL not defined — can't parse cert.
+                 * Return sentinel; caller will treat as "renew now". */
+                days = 999999;
+                #endif
+            }
+        }
+        return days
+    }
+
+    // Convenience wrapper for the renewal-decision loop. Returns
+    // true if certPath needs renewal — file missing, expired, or
+    // within `thresholdDays` of expiry.
+    //
+    //   if (AcmeNative.NeedsRenewal(certPath, 30)) {
+    //       AcmeNative.EnsureCert(domain, email, dir, "")
+    //   }
+    //
+    // thresholdDays of 30 is the common Let's Encrypt cadence — LE
+    // certs live 90 days, the canonical renewal window opens at 60
+    // days remaining (= 30 days early). Adjust if your CA has a
+    // different lifetime.
+    public static bool NeedsRenewal(certPath: string, thresholdDays: int) {
+        let days: int = AcmeNative.CertDaysRemaining(certPath)
+        if (days >= 999999) { return true }    // file missing / unreadable
+        if (days < thresholdDays) { return true }
+        return false
+    }
+
     // Instance state — populated as the flow progresses.
     public Server:    string
     public Dir:       AcmeDirectory

@@ -35,28 +35,30 @@ namespace AcmeRenew
 import Amalgame.Tls
 
 public class Program {
-    public static int Main(string[] args) {
-        if (args.Length < 4) {
+    public static int Main(List<string> args) {
+        let argc: int = Args_Count()
+        if (argc < 4) {
             Program.Usage()
             return 2
         }
 
-        let domain:  string = args[1]
-        let email:   string = args[2]
-        let certDir: string = args[3]
+        let domain:  string = Args_Get(1)
+        let email:   string = Args_Get(2)
+        let certDir: string = Args_Get(3)
 
         var server: string = AcmeNative.LeProd()
         var i: int = 4
-        while (i < args.Length) {
-            if (args[i] == "--staging") {
+        while (i < argc) {
+            let flag: string = Args_Get(i)
+            if (flag == "--staging") {
                 server = AcmeNative.LeStaging()
-            } else if (args[i] == "--prod") {
+            } else if (flag == "--prod") {
                 server = AcmeNative.LeProd()
-            } else if (args[i] == "-h" || args[i] == "--help") {
+            } else if (flag == "-h" || flag == "--help") {
                 Program.Usage()
                 return 0
             } else {
-                Console.WriteError("acme-renew: unknown flag '" + args[i] + "'")
+                Console.WriteError("acme-renew: unknown flag '" + flag + "'")
                 Program.Usage()
                 return 2
             }

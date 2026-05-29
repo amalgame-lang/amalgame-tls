@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        amc-tag: [v0.8.38]
+        amc-tag: [v0.8.59]
     steps:
       # tls checkout into its own dir so the amalgame-crypto sibling
       # (needed by AcmeNative — depends on crypto v0.3.0's JwsKey) can

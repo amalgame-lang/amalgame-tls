@@ -10,31 +10,19 @@ No certbot, no acme.sh, no lego. Just `./acme-renew` + libssl.
 ## Build
 
 ```sh
-./build.sh
+amc build main.am
+mv main acme-renew
 ```
 
-`build.sh` mirrors the working pattern from `tests/run_tests.sh`:
-pre-builds `crypto.am` + `json.am` + `acme.am` as `.o` files, then
-links the user binary against them using a fake package-cache + a
-transient `amalgame.lock` rooted at `$PKG_DIR`. Force-includes
-`Amalgame_Tls.h` and `Amalgame_Tls_Acme.h` at gcc time so that
-`AMALGAME_HAS_OPENSSL` is defined and the `AmalgameTlsAcmeHttpResponse`
-typedef is in scope.
+`amc build` (v0.8.59+) auto-resolves the `tls` dep from the
+`[dependencies]` table, precompiles the package facade, and links
+the binary. No additional flags or runtime tweaks needed.
 
-The cleaner `amc build main.am` recipe is the long-term plan —
-blocked today on two issues in amc v0.8.5x (multi-source resolver
-loses sibling-class typedefs during the `--lib` precompile of
-`acme.am`, and the autodetect macro for OpenSSL isn't visible when
-the generated `acme.c` is gcc'd in isolation). amalgame-tls CI runs
-against amc v0.8.38 where neither bug exists.
-
-Expected layout (sibling checkouts under `~/Développement/`):
-
-```
-amalgame-tls/        (this repo)
-amalgame-crypto/
-Amalgame/            (amc + runtime + stdlib)
-```
+> Earlier versions of this README documented a `build.sh`
+> workaround for an amc v0.8.5x cgen regression that dropped
+> sibling-class typedefs during the `--lib` precompile of
+> `acme.am`. **Fixed in amc v0.8.59** ([Amalgame#551](https://github.com/amalgame-lang/Amalgame/pull/551))
+> — `amc build` works directly now.
 
 ## Run
 

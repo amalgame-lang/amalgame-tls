@@ -5,10 +5,3 @@ examples/letsencrypt-site/server
 examples/letsencrypt-site/server.c
 examples/letsencrypt-site/core
 examples/letsencrypt-site/certs/
-
-# cmd/acme-renew build artifacts
-cmd/acme-renew/main
-cmd/acme-renew/main.c
-cmd/acme-renew/acme-renew
-cmd/acme-renew/amalgame.lock
-cmd/acme-renew/.amc/

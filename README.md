@@ -185,7 +185,20 @@ openssl req -x509 -newkey rsa:2048 -nodes -keyout server.key -out server.pem \
 - **v0.2.3**: `Acme.EnsureCertMulti(domains, email, dir, acme_server, certbot_path)` — multi-SAN provisioning. `domains` is a comma-separated list (whitespace + empty entries tolerated); the first one becomes the cert-name so `Acme.CertPath(dom0, dir)` still resolves. Up to 32 SANs per cert. `EnsureCert` and `EnsureCertEx` are now thin wrappers
 - **v0.3.0**: **native ACME (RFC 8555)** via `AcmeNative.EnsureCert(domain, email, dir, acme_server)`. Pure-AM state machine (directory → newNonce → newAccount → newOrder → http-01 → finalize → cert pickup) built on `amalgame-crypto v0.3.0`'s `JwsKey` (ES256) and an inline HTTPS client (`runtime/Amalgame_Tls_Acme.h`). No subprocess, no certbot dep. Account key persisted at `<dir>/account.key`; cert at `<dir>/<domain>/{fullchain,privkey}.pem`. http-01 challenge only in v0.3.0; multi-SAN returns in v0.3.1. Legacy `Acme.EnsureCert*` (certbot wrapper) is kept side-by-side
 - **v0.3.1**: `[dependencies]` table declares the runtime dep on `amalgame-crypto >= 0.3.0`. amc >= 0.8.39 auto-pulls it on `amc package add tls`. Older amc still works — the user just has to `amc package add crypto` manually first. Drops the surprising `Unknown symbol 'JwsKey'` resolver error early adopters hit on the first run after `amc package add tls`
-- **v0.3.2** ← *here*: ships the `acme-renew` CLI under [`cmd/acme-renew/`](./cmd/acme-renew/) — one-shot binary that wraps `AcmeNative.EnsureCert` so cron / systemd can drive cert renewals without writing custom Amalgame code. Build with `amc build main.am`, deploy anywhere with libssl. README documents the cron + `setcap` pattern
+- **v0.3.2**: shipped the `acme-renew` CLI under `cmd/acme-renew/` as a thin wrapper around `AcmeNative.EnsureCert` for cron-driven renewals. **Removed in v0.3.3** in favour of embedded auto-renewal in user code via the new helpers (see below). The exemple `examples/letsencrypt-site/` shows the embedded pattern; the legacy CLI history is preserved in git
+- **v0.3.3** ← *here*: ships `AcmeNative.CertDaysRemaining(certPath)` and `AcmeNative.NeedsRenewal(certPath, thresholdDays)` — small helpers that parse the leaf cert's `notAfter` via OpenSSL's `X509_get0_notAfter`. Pair with `amalgame-threading`'s `ThreadSpawn` for an embedded renewal loop:
+  ```amalgame
+  Threading.ThreadSpawn(arg => {
+      while (true) {
+          if (AcmeNative.NeedsRenewal(certPath, 30)) {
+              AcmeNative.EnsureCert(domain, email, dir, "")
+          }
+          Threading.ThreadSleep(86400000)  // 24h
+      }
+      return 0
+  }, 0)
+  ```
+  Dropping `cmd/acme-renew/` simplifies the deploy story — your Mosaic app self-renews instead of needing a separate binary + cron entry
 - **v0.3.x**: SNI handler (multi-cert dispatch), OCSP stapling, dns-01 challenge support, multi-SAN in AcmeNative
 
 ## License

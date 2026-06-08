@@ -45,10 +45,18 @@
 
 #include <openssl/x509.h>
 #include <openssl/pem.h>
-#include <netdb.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <fcntl.h>
+#ifndef _WIN32
+  #include <netdb.h>
+  #include <sys/socket.h>
+  #include <unistd.h>
+  #include <fcntl.h>
+#else
+  #include <direct.h>   /* _mkdir for the cert-dir mkdir -p */
+#endif
+/* On Windows the socket API + getaddrinfo come from winsock2/ws2tcpip,
+ * already included by Amalgame_Tls.h (which pulls this header in after
+ * its POSIX→Winsock shim), so the socket/close calls below route through
+ * the shared shim macros. */
 
 typedef struct AmalgameTlsAcmeHttpResponse {
     i64           status;     /* HTTP status code (200, 201, 400, …) */
@@ -499,7 +507,11 @@ static inline i64 Amalgame_Tls_Acme_SavePemFile(
                     char saved = dir[j];
                     dir[j] = 0;
                     if (dir[0]) {
+#ifdef _WIN32
+                        _mkdir(dir);
+#else
                         mkdir(dir, 0700);
+#endif
                     }
                     dir[j] = saved;
                     if (saved == 0) break;
@@ -508,39 +520,35 @@ static inline i64 Amalgame_Tls_Acme_SavePemFile(
             break;
         }
     }
-    int mode = secret ? 0600 : 0644;
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, mode);
-    if (fd < 0) return -1;
-    size_t left = strlen(content);
-    const char* p = content;
-    while (left > 0) {
-        ssize_t n = write(fd, p, left);
-        if (n < 0) { close(fd); return -1; }
-        p += n; left -= (size_t) n;
-    }
-    fchmod(fd, mode);
-    close(fd);
+    /* Portable file write via stdio — avoids POSIX open/write/fchmod AND
+     * the socket-close shim macro (these fds are FILES, not sockets). */
+    FILE* f = fopen(path, "wb");
+    if (!f) return -1;
+    size_t len = strlen(content);
+    size_t wrote = fwrite(content, 1, len, f);
+    fclose(f);
+    if (wrote != len) return -1;
+#ifndef _WIN32
+    /* Best-effort restrictive perms for private keys (POSIX only). */
+    chmod(path, secret ? 0600 : 0644);
+#else
+    (void) secret;
+#endif
     return 0;
 }
 
 static inline code_string Amalgame_Tls_Acme_LoadPemFile(code_string path) {
     if (!path || !path[0]) return "";
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return "";
-    struct stat st;
-    if (fstat(fd, &st) < 0 || st.st_size < 0 || st.st_size > 256 * 1024) {
-        close(fd); return "";
-    }
-    size_t sz = (size_t) st.st_size;
-    char* buf = (char*) GC_MALLOC(sz + 1);
-    size_t off = 0;
-    while (off < sz) {
-        ssize_t n = read(fd, buf + off, sz - off);
-        if (n <= 0) { close(fd); return ""; }
-        off += (size_t) n;
-    }
-    buf[sz] = 0;
-    close(fd);
+    FILE* f = fopen(path, "rb");
+    if (!f) return "";
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    rewind(f);
+    if (sz < 0 || sz > 256 * 1024) { fclose(f); return ""; }
+    char* buf = (char*) GC_MALLOC((size_t) sz + 1);
+    size_t got = fread(buf, 1, (size_t) sz, f);
+    fclose(f);
+    buf[got] = 0;
     return buf;
 }
 
@@ -560,6 +568,14 @@ static inline code_string Amalgame_Tls_Acme_LoadPemFile(code_string path) {
 static inline i64 Amalgame_Tls_Acme_SpawnChallengeServer(
         i64 port, code_string webroot) {
     if (!webroot || !webroot[0]) return -1;
+#ifdef _WIN32
+    /* fork() doesn't exist on Windows. ACME's standalone challenge
+     * server (which forks a child) isn't supported on the native
+     * Windows build — provide a cert file directly. FF-TAROT and other
+     * plain-HTTP users never reach this path. */
+    (void) port;
+    return -1;
+#else
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
@@ -570,10 +586,14 @@ static inline i64 Amalgame_Tls_Acme_SpawnChallengeServer(
         _exit(1);
     }
     return (i64) pid;
+#endif
 }
 
 static inline i64 Amalgame_Tls_Acme_StopProcess(i64 pid) {
     if (pid <= 0) return -1;
+#ifdef _WIN32
+    return 0;   /* no child was ever spawned (see SpawnChallengeServer) */
+#else
     if (kill((pid_t) pid, SIGTERM) < 0) {
         if (errno != ESRCH) return -1;
         return 0;  /* already gone */
@@ -591,6 +611,7 @@ static inline i64 Amalgame_Tls_Acme_StopProcess(i64 pid) {
     kill((pid_t) pid, SIGKILL);
     waitpid((pid_t) pid, &status, 0);
     return 0;
+#endif
 }
 
 #else  /* !AMALGAME_HAS_OPENSSL — stubs */

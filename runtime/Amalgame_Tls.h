@@ -31,16 +31,28 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <sys/wait.h>
-#include <unistd.h>
-#include <errno.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <signal.h>
-#include <time.h>
+#ifdef _WIN32
+  #ifndef WIN32_LEAN_AND_MEAN
+  #  define WIN32_LEAN_AND_MEAN
+  #endif
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+  #include <windows.h>
+  #include <errno.h>
+  #include <sys/stat.h>
+  #include <time.h>
+#else
+  #include <sys/socket.h>
+  #include <netinet/in.h>
+  #include <arpa/inet.h>
+  #include <sys/wait.h>
+  #include <unistd.h>
+  #include <errno.h>
+  #include <sys/stat.h>
+  #include <fcntl.h>
+  #include <signal.h>
+  #include <time.h>
+#endif
 
 /* ================================================================
    OpenSSL detection — multi-OS
@@ -76,6 +88,111 @@
 #    include "/usr/local/opt/openssl@3/include/openssl/x509v3.h"
 #  endif
 #endif
+
+#if defined(_WIN32) && !defined(AMALGAME_WIN_SOCK_SHIM)
+#define AMALGAME_WIN_SOCK_SHIM 1
+/* ── POSIX-socket → Winsock2 compatibility shim (Windows only) ──────
+ * Shared across the Amalgame networking packages (net-http, tls): the
+ * AMALGAME_WIN_SOCK_SHIM guard makes the first-included header define it
+ * and the others reuse it. Wrappers translate WSAGetLastError() into
+ * errno and the macro aliases route the POSIX names to them, so the
+ * BSD-socket code below compiles and behaves on Winsock2 unchanged.
+ * Placed AFTER the openssl probe so the macros never rewrite a system
+ * header. Identical to the copy in amalgame-net-http. */
+static inline int amsock_wsa2errno(int w) {
+    switch (w) {
+        case WSAEWOULDBLOCK:  return EWOULDBLOCK;
+        case WSAEINPROGRESS:  return EINPROGRESS;
+        case WSAEINTR:        return EINTR;
+        case WSAECONNRESET:   return ECONNRESET;
+        case WSAECONNABORTED: return ECONNABORTED;
+        case WSAENOTCONN:     return ENOTCONN;
+        case WSAETIMEDOUT:    return ETIMEDOUT;
+        case WSAEADDRINUSE:   return EADDRINUSE;
+        case WSAEINVAL:       return EINVAL;
+        case WSAEMFILE:       return EMFILE;
+        case WSAENOBUFS:      return ENOBUFS;
+        case 0:               return 0;
+        default:              return EIO;
+    }
+}
+static inline void amsock_wsa_init(void) {
+    static volatile LONG done = 0;
+    if (InterlockedCompareExchange(&done, 1, 0) == 0) {
+        WSADATA wsa; (void) WSAStartup(MAKEWORD(2, 2), &wsa);
+    }
+}
+__attribute__((constructor))
+static void amsock_wsa_ctor(void) { amsock_wsa_init(); }
+
+static inline int amsock_socket(int d, int t, int p) {
+    SOCKET s = socket(d, t, p);
+    if (s == INVALID_SOCKET) { errno = amsock_wsa2errno(WSAGetLastError()); return -1; }
+    return (int) s;
+}
+static inline int amsock_accept(int s, struct sockaddr* a, socklen_t* l) {
+    SOCKET c = accept((SOCKET) s, a, l);
+    if (c == INVALID_SOCKET) { errno = amsock_wsa2errno(WSAGetLastError()); return -1; }
+    return (int) c;
+}
+static inline int amsock_bind(int s, const struct sockaddr* a, socklen_t l) {
+    if (bind((SOCKET) s, a, l) == SOCKET_ERROR) { errno = amsock_wsa2errno(WSAGetLastError()); return -1; }
+    return 0;
+}
+static inline int amsock_listen(int s, int b) {
+    if (listen((SOCKET) s, b) == SOCKET_ERROR) { errno = amsock_wsa2errno(WSAGetLastError()); return -1; }
+    return 0;
+}
+static inline int amsock_connect(int s, const struct sockaddr* a, socklen_t l) {
+    if (connect((SOCKET) s, a, l) == SOCKET_ERROR) { errno = amsock_wsa2errno(WSAGetLastError()); return -1; }
+    return 0;
+}
+static inline int amsock_setsockopt(int s, int lv, int o, const void* v, socklen_t l) {
+    if (setsockopt((SOCKET) s, lv, o, (const char*) v, l) == SOCKET_ERROR) { errno = amsock_wsa2errno(WSAGetLastError()); return -1; }
+    return 0;
+}
+static inline int amsock_getsockopt(int s, int lv, int o, void* v, socklen_t* l) {
+    if (getsockopt((SOCKET) s, lv, o, (char*) v, l) == SOCKET_ERROR) { errno = amsock_wsa2errno(WSAGetLastError()); return -1; }
+    return 0;
+}
+static inline int amsock_recv(int s, void* b, size_t n, int f) {
+    int r = recv((SOCKET) s, (char*) b, (int) n, f);
+    if (r == SOCKET_ERROR) { errno = amsock_wsa2errno(WSAGetLastError()); return -1; }
+    return r;
+}
+static inline int amsock_send(int s, const void* b, size_t n, int f) {
+    int r = send((SOCKET) s, (const char*) b, (int) n, f);
+    if (r == SOCKET_ERROR) { errno = amsock_wsa2errno(WSAGetLastError()); return -1; }
+    return r;
+}
+static inline int amsock_shutdown(int s, int how) { return shutdown((SOCKET) s, how); }
+static inline int amsock_close(int fd) { return closesocket((SOCKET) fd); }
+static inline int amsock_set_nonblock(int fd) { u_long m = 1; return ioctlsocket((SOCKET) fd, FIONBIO, &m); }
+
+#define socket(d, t, p)            amsock_socket((d), (t), (p))
+#define accept(s, a, l)            amsock_accept((s), (a), (l))
+#define bind(s, a, l)              amsock_bind((s), (a), (l))
+#define listen(s, b)               amsock_listen((s), (b))
+#define connect(s, a, l)           amsock_connect((s), (a), (l))
+#define setsockopt(s, lv, o, v, l) amsock_setsockopt((s), (lv), (o), (v), (l))
+#define getsockopt(s, lv, o, v, l) amsock_getsockopt((s), (lv), (o), (v), (l))
+#define recv(s, b, n, f)           amsock_recv((s), (b), (n), (f))
+#define send(s, b, n, f)           amsock_send((s), (b), (n), (f))
+#define shutdown(s, h)             amsock_shutdown((s), (h))
+#define close(fd)                  amsock_close(fd)
+
+#ifndef SHUT_RD
+#  define SHUT_RD   SD_RECEIVE
+#  define SHUT_WR   SD_SEND
+#  define SHUT_RDWR SD_BOTH
+#endif
+#ifndef MSG_DONTWAIT
+#  define MSG_DONTWAIT 0
+#endif
+#ifndef MSG_NOSIGNAL
+#  define MSG_NOSIGNAL 0
+#endif
+#endif /* _WIN32 shim */
 
 /* ================================================================
    Common forward decls — same shape with or without OpenSSL.
@@ -741,6 +858,16 @@ static inline i64 Amalgame_Tls_Acme_EnsureCertMulti(code_string domains,
                 server ? server      : "");
     }
     fflush(stdout);
+#ifdef _WIN32
+    /* fork/execvp/waitpid don't exist on Windows. ACME auto-provisioning
+     * via certbot isn't supported on the native Windows build — callers
+     * should supply a cert file directly. (FF-TAROT and other plain-HTTP
+     * users never reach this path.) */
+    (void) argv;
+    fprintf(stderr, "Acme.EnsureCert: not supported on Windows "
+            "(provide a certificate file instead of certbot auto-provisioning)\n");
+    return -1;
+#else
     pid_t pid = fork();
     if (pid < 0) {
         fprintf(stderr, "Acme.EnsureCert: fork failed: %s\n", strerror(errno));
@@ -774,6 +901,7 @@ static inline i64 Amalgame_Tls_Acme_EnsureCertMulti(code_string domains,
     }
     fprintf(stdout, "Acme.EnsureCert: cert ready for %s\n", domain);
     return 0;
+#endif
 }
 
 /* Convenience wrapper — keeps the v0.2.2 single-domain API working.

@@ -410,10 +410,34 @@ static inline code_string Amalgame_Tls_Acme_CsrDer_Base64Url(
         /* version v1 (encoded as 0 per X.509) */
         if (!X509_REQ_set_version(req, 0)) break;
 
+        /* `domain` may be a comma-separated list (multi-SAN). The first
+         * non-empty element is the CN; every element becomes a dNSName
+         * SAN. A single hostname (no comma) behaves exactly as before. */
+        char _dbuf[1024];
+        size_t _dl = strlen(domain);
+        if (_dl >= sizeof(_dbuf)) break;
+        memcpy(_dbuf, domain, _dl + 1);
+        char* _dlist[64];   /* generous SAN cap, independent of include order */
+        int _dn = 0;
+        {
+            char* _p = _dbuf;
+            while (*_p && _dn < 64) {
+                while (*_p == ' ' || *_p == '\t' || *_p == ',') _p++;
+                if (!*_p) break;
+                char* _s = _p;
+                while (*_p && *_p != ',') _p++;
+                char* _e = _p;
+                if (*_p == ',') { *_p = '\0'; _p++; }
+                while (_e > _s && (_e[-1] == ' ' || _e[-1] == '\t')) { _e--; *_e = '\0'; }
+                if (*_s) _dlist[_dn++] = _s;
+            }
+        }
+        if (_dn == 0) break;
+
         X509_NAME* name = X509_NAME_new();
         if (!name) break;
         if (!X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_UTF8,
-                (const unsigned char*) domain, -1, -1, 0)) {
+                (const unsigned char*) _dlist[0], -1, -1, 0)) {
             X509_NAME_free(name); break;
         }
         if (!X509_REQ_set_subject_name(req, name)) {
@@ -421,12 +445,19 @@ static inline code_string Amalgame_Tls_Acme_CsrDer_Base64Url(
         }
         X509_NAME_free(name);
 
-        /* SubjectAltName extension — dNSName: <domain> */
+        /* SubjectAltName extension — one dNSName per element. */
         STACK_OF(X509_EXTENSION)* exts = sk_X509_EXTENSION_new_null();
         if (!exts) break;
-        char san_value[768];
-        int sl = snprintf(san_value, sizeof(san_value), "DNS:%s", domain);
-        if (sl < 0 || (size_t) sl >= sizeof(san_value)) {
+        char san_value[2048];
+        size_t _sp = 0;
+        int _sanbad = 0;
+        for (int _i = 0; _i < _dn; _i++) {
+            int _w = snprintf(san_value + _sp, sizeof(san_value) - _sp,
+                              "%sDNS:%s", _i ? "," : "", _dlist[_i]);
+            if (_w < 0 || (size_t)(_sp + (size_t) _w) >= sizeof(san_value)) { _sanbad = 1; break; }
+            _sp += (size_t) _w;
+        }
+        if (_sanbad) {
             sk_X509_EXTENSION_pop_free(exts, X509_EXTENSION_free);
             break;
         }

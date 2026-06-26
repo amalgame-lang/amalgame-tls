@@ -246,8 +246,23 @@ public class AcmeNative {
             Acme.SavePemFile(acctUrlPath, this.AcctUrl,                 1)
         }
 
-        // 5) newOrder
-        let orderPayload: string = "{\"identifiers\":[{\"type\":\"dns\",\"value\":\"" + domain + "\"}]}"
+        // 5) newOrder — `domain` peut être une liste CSV (multi-SAN) : un
+        //    identifiant DNS par hôte ; le premier élément sert de nom de cert.
+        var idJson: string = ""
+        var firstDom: string = ""
+        let _parts: List<string> = String_Split(domain, ",")
+        var _pk: int = 0
+        while (_pk < _parts.Count()) {
+            let d0: string = _parts.Get(_pk)
+            if (String_Length(d0) > 0) {
+                if (String_Length(idJson) > 0) { idJson = idJson + "," }
+                idJson = idJson + "{\"type\":\"dns\",\"value\":\"" + d0 + "\"}"
+                if (String_Length(firstDom) == 0) { firstDom = d0 }
+            }
+            _pk = _pk + 1
+        }
+        if (String_Length(firstDom) == 0) { firstDom = domain }
+        let orderPayload: string = "{\"identifiers\":[" + idJson + "]}"
         let orderResp = this.PostJws(this.Dir.NewOrder, this.AcctUrl,
                                      orderPayload)
         if (orderResp == null
@@ -415,8 +430,8 @@ public class AcmeNative {
         let certPem: string = certResp.body
 
         // 15) Write cert + key to disk
-        let certPath: string = dir + "/" + domain + "/fullchain.pem"
-        let keyPath:  string = dir + "/" + domain + "/privkey.pem"
+        let certPath: string = dir + "/" + firstDom + "/fullchain.pem"
+        let keyPath:  string = dir + "/" + firstDom + "/privkey.pem"
         if (Acme.SavePemFile(certPath, certPem, 0) != 0) {
             Console.WriteLine("AcmeNative: can't write " + certPath)
             return -4
